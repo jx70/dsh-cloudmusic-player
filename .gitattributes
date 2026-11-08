@@ -1,0 +1,17 @@
+# 仓库内统一 LF。
+#
+# 本仓库所有文件都是 LF（含 lib/helper.ps1），但 Windows 上 git 默认
+# core.autocrlf=true 会在 checkout 时把文本文件改成 CRLF —— 那会让
+# helper.ps1 的 BOM 与行尾在某些工具链下被改写，PowerShell 5.1 读中文
+# 注释就会报「类、结构或接口成员声明中的标记“{”无效」。
+* text=auto eol=lf
+
+# PowerShell 脚本：必须是 LF + UTF-8 BOM（BOM 由文件内容自带，git 不动它）
+*.ps1 text eol=lf
+
+# 二进制资源：不做任何行尾转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.gz binary

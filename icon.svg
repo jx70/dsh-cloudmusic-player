@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="CloudMusic Player">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff3b5c"/>
+      <stop offset="1" stop-color="#c8102e"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#g)"/>
+  <circle cx="32" cy="32" r="21" fill="#ffffff" opacity="0.14"/>
+  <g fill="#ffffff">
+    <path d="M28.5 20.4v15.2a5.6 5.6 0 1 0 2.6 4.72V27.1l9.2-2.3v7.0a5.6 5.6 0 1 0 2.6 4.72V18.6z" opacity="0.96"/>
+  </g>
+  <g fill="#ffffff" opacity="0.92">
+    <rect x="14" y="46" width="4" height="6" rx="2"/>
+    <rect x="20.5" y="43" width="4" height="9" rx="2"/>
+    <rect x="27" y="45" width="4" height="7" rx="2"/>
+  </g>
+</svg>

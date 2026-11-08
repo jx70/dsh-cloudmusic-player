@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+pnpm-lock.yaml
+.npm/
+
+# 构建/日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+dist/
+coverage/
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+
+# 本地实验产物（探针脚本、临时 dumps）
+probe/
+probe-*.mjs
+probe-*.ps1
+tmp/
+tmp-*.json
+*.tmp
+*.bak
+*.orig

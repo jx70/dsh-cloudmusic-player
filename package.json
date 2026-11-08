@@ -1,0 +1,79 @@
+{
+  "name": "dsh-cloudmusic-player",
+  "version": "0.2.0",
+  "description": "DSH 悬浮播放器：联动本地网易云音乐客户端，调音量 / 切歌 / 滚动歌词",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cloudmusic",
+    "netease",
+    "player",
+    "lyrics",
+    "smtc"
+  ],
+  "license": "MIT",
+  "author": "dsh-cloudmusic-player contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jx70/dsh-cloudmusic-player.git"
+  },
+  "homepage": "https://github.com/jx70/dsh-cloudmusic-player#readme",
+  "bugs": {
+    "url": "https://github.com/jx70/dsh-cloudmusic-player/issues"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "test",
+    "scripts",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test test/elog.test.mjs test/lyrics.test.mjs test/transport.test.mjs",
+    "enable-desktop": "node scripts/enable-desktop.mjs",
+    "sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-github.ps1"
+  },
+  "icon": "./icon.svg",
+  "engines": {
+    "dsh": ">=0.1.0-rc.6",
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

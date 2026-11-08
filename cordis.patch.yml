@@ -1,0 +1,20 @@
+# ============================================================================
+# dsh-cloudmusic-player — bundle patch（插件自己带的挂载声明）
+# ============================================================================
+# 装好之后 profile 只要在 `dsh.profile.bundles` 里列出本包名即生效，
+# 不用手改 profile 自己的 cordis.patch.yml。
+#
+#   dsh plugin --profile web add dsh-cloudmusic-player
+#   （本地开发：dsh plugin --profile web add link:<插件目录>）
+#
+# 真正的用户配置在插件自己的 Config 里（设置页可改），这里只放默认值。
+# ============================================================================
+
+- insert:
+    - id: cloudmusic-player
+      name: dsh-cloudmusic-player
+      config:
+        processName: cloudmusic
+        aumidPattern: "cloudmusic|netease|wangyi"
+        volumeScope: process
+        lyricsEnabled: true

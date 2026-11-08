@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "title": "NetEase Music Player",
+    "description": "A small floating player inside DSH, wired to your local NetEase Cloud Music client: prev / play-pause / next, drag the volume, scrolling lyrics."
+  },
+  "player": {
+    "play": "Play",
+    "pause": "Pause",
+    "next": "Next",
+    "prev": "Previous",
+    "volume": "Volume",
+    "lyrics": "Lyrics",
+    "close": "Collapse",
+    "collapse": "Collapse",
+    "expand": "Expand",
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "idle": "Nothing playing",
+    "noClient": "NetEase client is not running",
+    "noClientHint": "Open the NetEase client and start a song; this panel picks it up automatically",
+    "unsupported": "Media control is unavailable here",
+    "unsupportedHint": "Requires Windows 10 1809+ and PowerShell 5.1",
+    "helperDown": "The background helper stopped responding",
+    "helperDownHint": "Hit retry, or wait for the automatic restart",
+    "noLyrics": "No lyrics",
+    "noLyricsHint": "No lyrics found for this track",
+    "lyricsOff": "Lyrics disabled",
+    "lyricsOffHint": "Turn on \"fetch lyrics\" in the settings",
+    "scopeProcess": "App only",
+    "scopeSystem": "System",
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "settings": "Settings"
+  }
+}
