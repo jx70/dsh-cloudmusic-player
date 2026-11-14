@@ -76,6 +76,16 @@ function trackLine({ id, name, artist, duration }, agoMs, kind = 'playOneTrackIn
   return line(`,"${kind}",${json}`, agoMs)
 }
 
+/**
+ * 造「只带元数据、不代表起播」的那两条（nativePlay / refreshCurPlaying 同形）。
+ * 真实日志里 refreshCurPlaying 还会多一段 `"curPlaying="`，两条事件字段一致。
+ */
+function metaLine({ id, name, artist, duration }, agoMs, kind = 'nativePlay') {
+  const json = `{"id":"${id}","displayOrder":1,"track":{"id":"${id}","duration":${duration},"name":"${name}","artists":[{"id":"1","name":"${artist}"}],"album":{"id":"2","name":"专辑名"}}}`
+  const mid = kind === 'refreshCurPlaying' ? '"curPlaying=",' : ''
+  return line(`,"${kind}",${mid}${json}`, agoMs)
+}
+
 const startedLine = (id, duration, agoMs) =>
   line(`,"native播放资源load完成，开始播放",{"songId":"${id}","songDuration":"${duration}"}`, agoMs)
 
@@ -200,6 +210,15 @@ test('classifyLine 识别全部六类事件', () => {
   assert.equal(classifyLine(',exitApp').type, 'exit-app')
   assert.equal(classifyLine(',Process 16488 exited').type, 'exit-process')
   assert.equal(classifyLine(',"unrelated","event"'), null)
+})
+
+test('classifyLine：nativePlay / refreshCurPlaying 单独归为 trackmeta', () => {
+  const meta = { id: '9', name: '元数据', artist: 'M', duration: 100_000 }
+  assert.equal(classifyLine(metaLine(meta, 0, 'nativePlay').split('】,')[1]).type, 'trackmeta')
+  assert.equal(classifyLine(metaLine(meta, 0, 'refreshCurPlaying').split('】,')[1]).type, 'trackmeta')
+  // 把 nativePlay 当值用的两行必须排除，否则每次播放都会误当换歌
+  assert.equal(classifyLine(',"setPlaying","enter nativePlay"'), null)
+  assert.equal(classifyLine(',"-------nativePlay，用户音效设置开关：false ，音效名字3D环绕"'), null)
 })
 
 // ---------------------------------------------------------------------------
@@ -483,6 +502,101 @@ test('Watcher：只有 started 没有详情时先占位 songId', () => {
     assert.equal(s.available, true)
     assert.equal(s.track.title, '补全')
     assert.equal(s.durationMs, 123_000)
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：只发 nativePlay + started 的起播路径也能拿到完整歌名', () => {
+  // 真实场景：网易云 3.1.43「每日推荐」自动切歌时不发 playOneTrackInPlayingList，
+  // 只发 refreshCurPlaying → nativePlay → started。旧实现会退化成空歌名，
+  // 上层于是判定「无时间轴」，界面上表现为进度条消失 + 歌词变成可点击对齐。
+  const file = tmpFile()
+  writeLog(file, [
+    metaLine({ id: '2123807718', name: 'Color Your Night', artist: 'Lotus Juice', duration: 227_240 }, 30_000, 'refreshCurPlaying'),
+    startedLine('2123807718', 227_240, 29_000),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    const s = w.getState()
+    assert.equal(s.available, true)
+    assert.equal(s.songId, '2123807718')
+    assert.equal(s.track.title, 'Color Your Night')
+    assert.equal(s.track.artist, 'Lotus Juice')
+    assert.equal(s.durationMs, 227_240)
+    assert.ok(s.positionMs > 28_000 && s.positionMs < 31_500, `pos=${s.positionMs}`)
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：nativePlay 作为 started 之后的补全来源也不重置进度', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    startedLine('5', 200_000, 60_000),
+    metaLine({ id: '5', name: '后到的歌名', artist: 'N', duration: 200_000 }, 59_000, 'nativePlay'),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    const s = w.getState()
+    assert.equal(s.track.title, '后到的歌名')
+    // 关键：trackmeta 不能像 track 那样把锚点重置成 0
+    assert.ok(s.positionMs > 58_000, `pos=${s.positionMs}，trackmeta 不该重置进度`)
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：refreshCurPlaying 在播放中途出现时不打断进度', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine({ id: '3', name: '正在播', artist: 'P', duration: 300_000 }, 90_000),
+    startedLine('3', 300_000, 90_000),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    const before = w.getState().positionMs
+    assert.ok(before > 88_000, `before=${before}`)
+
+    // 用户翻了一下播放列表，客户端吐一条 refreshCurPlaying（同一首）
+    appendLog(file, [
+      metaLine({ id: '3', name: '正在播', artist: 'P', duration: 300_000 }, 0, 'refreshCurPlaying'),
+    ])
+    w.poll()
+    const after = w.getState()
+    assert.ok(after.positionMs >= before - 1_000, `after=${after.positionMs}，不该跳回开头`)
+    assert.equal(after.track.title, '正在播')
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：换歌时 nativePlay 先到、started 未到时仍报旧歌', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine({ id: '1', name: '旧歌', artist: 'A', duration: 200_000 }, 60_000),
+    startedLine('1', 200_000, 59_000),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    assert.equal(w.getState().track.title, '旧歌')
+
+    // 新歌的元数据先到，但还没开始播（started 没来）
+    appendLog(file, [metaLine({ id: '2', name: '新歌', artist: 'B', duration: 180_000 }, 0)])
+    w.poll()
+    assert.equal(w.getState().track.title, '旧歌', '没起播就不该换歌名')
+
+    // started 到了，这时才切换
+    appendLog(file, [startedLine('2', 180_000, 0)])
+    w.poll()
+    const s = w.getState()
+    assert.equal(s.songId, '2')
+    assert.equal(s.track.title, '新歌')
+    assert.equal(s.durationMs, 180_000)
   } finally {
     w.stop()
   }

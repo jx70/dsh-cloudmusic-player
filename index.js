@@ -355,6 +355,9 @@ export function apply(ctx, config) {
           transport: transportState.transport,
           transportNote: transportState.note,
           capabilities: helper.capabilities,
+          // seek 的副作用：走 orpheus:// 协议投递时，客户端会顺手把主窗口 show
+          // 出来（哪怕它正收在托盘）。前端据此决定要不要在拖进度前提示一句。
+          seekWindowLeak: player.windowLeak !== false,
           helper,
           lyrics: { enabled: lyrics.enabled(), base: lyrics.base() },
         })
@@ -475,14 +478,14 @@ export function apply(ctx, config) {
           if (vol && appPct !== null && sysPct !== null && Math.abs(appPct - sysPct) > 1) {
             vol += `（系统 ${sysPct}%${st.systemVolume.muted ? ' 静音' : ''}）`
           }
-          // 进度来源有三种：smtc（系统给的准值）、elog（客户端日志，可读不可 seek）、
+          // 进度来源有三种：smtc（系统给的准值）、elog（客户端日志，靠 orpheus 协议 seek）、
           // peak（峰值估算，没有时间轴）。别在 peak 状态下报一个假的 0:00 / 0:00。
           const hasTimeline = Number(n.end) > 0
           const src = n.positionSource === 'elog' ? '客户端日志' : n.positionSource === 'smtc' ? '系统媒体会话' : '峰值估算'
           const progress = hasTimeline
-            ? `进度 ${fmt(n.pos)} / ${fmt(n.end)}（来自${src}${n.canSeek ? '' : '，不能 seek'}）`
+            ? `进度 ${fmt(n.pos)} / ${fmt(n.end)}（来自${src}${n.canSeek ? '，可 seek' : '，不能 seek'}）`
             : `进度：${src}拿不到时间轴（无法 seek）`
-          const lane = n.channel === 'native' ? '原生车道（窗口标题 + 音频峰值 + 客户端全局热键）' : '系统媒体会话（SMTC）'
+          const lane = n.channel === 'native' ? '原生车道（窗口标题 + 音频峰值 + 客户端全局热键 + orpheus 协议 seek）' : '系统媒体会话（SMTC）'
           return [
             `${status} · ${n.title || '(无标题)'}${n.artist ? ` - ${n.artist}` : ''}`,
             progress,

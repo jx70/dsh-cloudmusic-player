@@ -67,7 +67,7 @@ README 只讲「怎么装、怎么用」。这份文档讲**为什么这么写**
 | 车道 | 用在什么时候 | 歌名/歌手 | 进度 | 控制 |
 |---|---|---|---|---|
 | **系统媒体会话（SMTC）** | 客户端正确注册了系统媒体控制 | WinRT 会话属性 | 会话时间轴，可 seek | WinRT 控制 |
-| **客户端日志（native）** | 客户端没注册 SMTC，或注册失败（网易云 3.x 的常态） | `cloudmusic.elog` 里的曲目事件 | `cloudmusic.elog` 回放，精确到毫秒 | 客户端全局热键（`Ctrl+Alt+P` 等） |
+| **客户端日志（native）** | 客户端没注册 SMTC，或注册失败（网易云 3.x 的常态） | `cloudmusic.elog` 里的曲目事件 | `cloudmusic.elog` 回放，精确到毫秒 | 客户端全局热键（`Ctrl+Alt+P` 等）+ orpheus 协议（seek） |
 
 native 车道里，窗口标题 + 音频峰值仍然在，但只作**兜底**：日志读不到（旧版客户端、日志被关、
 日志还没写入第一条事件）时，才回落到「窗口标题取歌名 + 峰值判播放态 + 没有进度」。
@@ -99,6 +99,66 @@ native 车道里，窗口标题 + 音频峰值仍然在，但只作**兜底**：
 发键前**不抢前台焦点** —— 全局热键不需要焦点，`SetForegroundWindow` 反而会打断你正在做的事。
 
 没有采用 `VK_MEDIA_PLAY_PAUSE`（键盘上的媒体键）：它会同时暂停浏览器里正在放的东西。
+
+### native 车道怎么跳进度：orpheus 协议
+
+热键里没有「跳到某处」这一档，但客户端注册了自己的 URL 协议：
+
+```
+HKLM\SOFTWARE\Classes\orpheus\shell\open\command
+  = "D:\CloudMusic\cloudmusic.exe" --webcmd="%1"
+```
+
+编码是 `orpheus://<base64(JSON)>`，JSON 为 `{cmd, value}`（`seek` 的 `value` 是秒，可为负表示相对）。
+第二个 `cloudmusic.exe` 进程会检测到已有实例，把命令交给主进程后立刻退出（日志
+`orpheus_runner.cpp(535)] Another client is exist.`）。主进程前端 `73.chunk` 里
+`onWebMessage` 的 `case "seek"` → `playing/setPlayingPosition` → 原生 `audioplayer.cpp DoSeek pos:N`，
+是真跳而不是改显示。同一个 switch 里还有 `pause` / `resume` / `next` / `previous` / `volume` / `mode`。
+
+**代价：客户端收到任何 orpheus 消息都会 `showWindow`。** 前端 `app.chunk` 的 `activeWindow` effect
+末尾是无条件的 `"webmsg" === t && (yield o({ type: "showWindow" }))`，`actionId` 白名单管不到这一行。
+所以这条路必须配一整套窗口压制，否则用户一拖进度，播放器就蹦到眼前。
+
+### 窗口压制（为什么 helper.ps1 有三分之一是干这个的）
+
+投递前先躲、投递后盯着，两边都得做：
+
+| 原状态 | 投递前 | 投递后 |
+|---|---|---|
+| 最小化 | 空 region（`SetWindowRgn`）+ layered `alpha=0`，不改尺寸 | 每拍按回 `SW_MINIMIZE`，上限 40 次 |
+| 收托盘 | 同上 | 每拍 `SW_HIDE` |
+| 可见 | z 序插回原位（`SetWindowPos` 到调用前紧邻它下面的那个窗口） | 盯着 `IsAbove(hwnd, fg)`，抬高就插回去 |
+
+**不能用 1×1 park。** 早期版本把 `rcNormalPosition` 改成 `(0,0,1,1)` 让客户端 restore 到角落，
+CEF 会照着这份 geometry 重新 layout；等我们把它拉回 1175×940，客户端的自绘标题栏层和 8 个
+`OrpheusShadow` 边框窗不跟着重排，顶部留一条 61～62 行的**永久白带**，任何 nudge / invalidate /
+缩放 / 显隐都清不掉。另外 `SetWindowPlacement` 在隐藏态会把窗口「写活」（`vis` 从 false 变 true，
+屏幕上多出一个 1×1 的小点）。现在只用 region + alpha，不改尺寸。
+
+**白带的真身是 `OrpheusShadow`。** 客户端有 4 个可见的 `WS_POPUP + WS_EX_TRANSPARENT` 边框窗
+（顶边那个 1239×64 覆盖窗口顶部 32 逻辑像素），它们永远画纯白，正常状态压在主窗口下面只露出一圈
+柔化阴影；客户端从最小化 restore 时会把它们排到主窗口**上面**，顶部就白了一片。
+z 序压底当场有效但客户端下一次 restore 会重新排回来；`RGN_DIFF` 只能降到 13 行。
+唯一持久的是把它们的 visible region 清空（`SetWindowRgn` 到空 region）——代价是窗口外沿那圈
+阴影没了，用户拖进度时察觉不到。所以 `MuteShadows()` 在投递前调用，而且**不恢复**。
+
+**守卫要盯满 8 秒。** 实测一次 seek 引来 2～3 拨 show，最晚一拨落在 7.3 秒
+（`orpheus_runner` 起新进程转发耗的），所以收敛条件是 `elapsed >= LATE_MS(8200) && quiet >= 1500`，
+不能只用安静窗口。
+
+**收尾要修 `rcNormalPosition`。** 客户端某一拨 show 会把窗口搬到最小化的占位几何
+（`-25600, 159×27`）却仍然 `ico=False` / `showCmd=1`——它认为那是「没显示」，Windows 认为那是一扇
+挂在屏幕外的正常窗口，而且这一下顺手把 `rcNormalPosition` 也写成了那个假几何。不补的话用户下次
+还原出来是个 159×27 的小条。收尾按「查到 `IsIconic` 为真为止」重试（最多 8 次 ×40ms），
+确认真的按回去了再检查 `rcNormalPosition` 是否退化成 `<200px` 或 `<= -20000`，是就写回原矩形。
+最小化态下 `SetWindowPlacement` 只改 `rcNorm`、不动 `showCmd`，实测持久。
+
+**「用户自己打开」只认一条证据**：光标在外壳上 + 左键按着（`CursorOnShell()` + `GetAsyncKeyState(0x01)`）。
+试过的其它判据全部失效：`GetLastInputInfo` 的 idle（客户端自己 show 会把它打回 0~30ms）、
+「前台是 shell」（窗口被按回最小化后前台常驻任务栏，静置 2 秒就误判）、
+「窗口从最小化变普通窗口」（客户端自己 show 也造成它）。
+外壳判定不能只看 `WindowFromPoint`：本机任务栏上盖着微信的 `Qt51514QWindowIcon`，
+命中它会让 `IsShellWindow` 判 false，所以要回退到「光标落在 `Shell_TrayWnd` 矩形内」。
 
 ### 歌名从窗口标题来（兜底路径）
 
@@ -381,8 +441,8 @@ int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid guidEventContex
 
 失败一律 `{ ok: false, error, detail }`，**不返回 500** —— 悬浮框要能稳定显示错误，而不是白屏。
 
-业务失败的 `error` 取值：`no-session`（没有可控制的会话）、`seek-unsupported`（native 车道不能 seek）、
-`bad-action`（未知动作）、`helper-unavailable`（助手起不来）、`lyrics-disabled`（歌词被关了）。
+业务失败的 `error` 取值：`no-session`（没有可控制的会话）、`seek-unsupported`（车道既没有时间轴也没有
+orpheus 协议通道）、`bad-action`（未知动作）、`helper-unavailable`（助手起不来）、`lyrics-disabled`（歌词被关了）。
 
 ---
 
@@ -545,8 +605,9 @@ Linux 上是 `playerctl` + `pactl`。
 - **不登录、不搜索、不建歌单**。它只控制「已经在放的那首」。
 - 只有 Windows 有真实后端。macOS / Linux 上悬浮框与歌词可用，播放控制与音量显示「本机不支持」。
 - 必须 PowerShell 5.1；PowerShell 7 无 WinRT 投影，`winrt: false`。
-- **native 车道不能拖动 seek**。进度是从客户端日志读出来的，准到毫秒，但「跳到某个位置」没有
-  可用的热键通道，所以 `canSeek` 恒为 false。SMTC 车道能 seek。
+- **native 车道跳进度会起一个短命的 `cloudmusic.exe`**。进度是从客户端日志读出来的，准到毫秒；
+  「跳到某个位置」走客户端自己的 `orpheus://` 协议入口，第二条进程把消息转交主进程后约 1 秒内自行
+  退出（日志 `Another client is exist.`）。松手才发一次，不是连续发。
 - **native 车道的进度依赖客户端日志**（`cloudmusic.elog`）。日志读不到（旧版客户端 / 关掉了日志 /
   路径不同）时会降级成「本地计时 + 点歌词校准」，那一刻的起点就只能是猜的：
   起点 =「插件第一次看到这首歌的一刻」，中途打开面板会**滞后**（滞后量 = 打开前已播的时长）。
@@ -606,6 +667,10 @@ Linux 上是 `playerctl` + `pactl`。
 | 歌词前面十几秒不动 | 正常：那会儿 LRC 里只有作词/作曲/编曲/制作人几行，署名行不参与高亮，等第一句真歌词出现就开始走了 |
 | 外语歌没有小字译文 | `lyricsTranslation` 是不是 false；中文歌本来就没有译文。要么这首在网易云就没翻译。旧缓存（schema 1）会在下次取词时自动作废重取 |
 | 进度条不出现 / 时间显示 `—` | `health?deep=1` 里 `elog.available: false` → 看 `elog.reason`（`missing` / `no-track-yet` / `client-exited`），或 `elogEnabled` 被关了 |
+| 拖了进度没反应 / 返回 `seek-unsupported` | `reg query HKLM\SOFTWARE\Classes\orpheus` 有没有那条 `--webcmd` —— 没有就是客户端版本太老或安装方式特殊；返回 `channel: smtc` 说明走的是会话车道，不是 orpheus |
+| 跳进度时客户端窗口闪一下 | 预期行为：客户端收到任何 orpheus 消息都会 `showWindow`，helper 在投递前遮、投递后按。若托盘态也露出来，看 `MuteShadows` / `Ghost` 是否被 `userGrace` 跳过（0.3.0 起豁免期只关「按回」，不关遮罩） |
+| 跳完进度顶部一条白带 | 那 4 个 `OrpheusShadow` 又被排到主窗口上面了。正常路径下 `MuteShadows()` 在投递前就清空它们的 region；若反复出现，确认 helper 不是旧版本（`health?deep=1` 的 `stderr` 里有没有 PowerShell 编译错） |
+| 跳进度后窗口变成 159×27 的小条 | `rcNormalPosition` 被写成了最小化的假几何。0.3.0 起收尾会检查 `< 200 px` 或 `<= -20000` 并写回原矩形；旧版本只能手动拖回来 |
 | 桌面版里悬浮框报错 / 一直「后台没响应」 | `/health` 的 `transport` 是不是 `none`；再确认 `node scripts/enable-desktop.mjs --check` 的两个「已就绪」，以及跑完脚本有没有重启 dsh-desktop |
 | 桌面版启动后插件不见了 | home patch 里那段是不是被 `disabled` 求值成 `true`（表达式只看树里有没有 `@dsh-desktop/client`） |
 | web profile 里报 `webserver: duplicate exact route` | 两条车道同时存在（home patch 的 `!!js` 条件失效或被手改过）。`node scripts/enable-desktop.mjs --remove` 即可 |

@@ -76,6 +76,11 @@ window.__ModuleLoader__.load({
         scopeSystem: '调系统音量',
         noTimeline: '客户端不共享进度 · 点歌词行对齐',
         alignHint: '点这一句可以按它校准歌词',
+        seek: '进度（可拖动跳转）',
+        seekHint: '拖动或按方向键跳转',
+        seekFailed: '跳转没送达客户端',
+        seekWindowLeaked: '已跳转，但播放器窗口被拉了出来',
+        seekWindowWarn: '拖进度会短暂唤起播放器窗口',
         settings: '设置',
       },
       en: {
@@ -107,6 +112,11 @@ window.__ModuleLoader__.load({
         scopeSystem: 'System',
         noTimeline: 'no shared timeline · click a line to sync',
         alignHint: 'Click a line to sync the lyrics to it',
+        seek: 'Position (drag to seek)',
+        seekHint: 'Drag or use arrow keys to seek',
+        seekFailed: 'Seek did not reach the client',
+        seekWindowLeaked: 'Sought, but the player window was pulled up',
+        seekWindowWarn: 'Dragging briefly pulls the player window up',
         settings: 'Settings',
       },
     }
@@ -339,6 +349,23 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // ── /health：只为了拿 seekWindowLeak ──────────────────────────────────
+      // 走 orpheus:// 协议投递 seek 时，客户端会把主窗口 show 出来（它自己
+      // activeWindow effect 里那句无条件 showWindow）。这是那份代价的开关：
+      // 开着就在拖进度条时提示一句，关着（SMTC 车道）就完全不提。
+      const [leakWarn, setLeakWarn] = React.useState(false)
+      React.useEffect(() => {
+        let alive = true
+        call('/health')
+          .then((data) => {
+            if (alive && data) setLeakWarn(data.seekWindowLeak === true)
+          })
+          .catch(() => {})
+        return () => {
+          alive = false
+        }
+      }, [])
+
       // ── 进度/歌词高亮的本地节拍 ────────────────────────────────────────────
       const playing = !!(st && st.now && st.now.status === 'Playing')
       React.useEffect(() => {
@@ -550,6 +577,70 @@ window.__ModuleLoader__.load({
         e.preventDefault()
       }
 
+      // ── 进度条拖动 ────────────────────────────────────────────────────────
+      // seekPos: 拖动中的位置（秒）。null = 没有在拖，进度条跟实时时钟走。
+      // 拖动期间每帧都要让 React 重画，靠 forceTick 就行（200ms 一次够看）。
+      const [seekPos, setSeekPos] = React.useState(null)
+      const seekPosRef = React.useRef(null)
+      // 松手后要跳的位置：先本地跳到那里（视觉立刻跟手），再等后端确认
+      const [seekPending, setSeekPending] = React.useState(null)
+
+      const setSeek = (v) => {
+        seekPosRef.current = v
+        setSeekPos(v)
+      }
+
+      const commitSeek = async (ms) => {
+        const target = Math.max(0, Math.round(ms))
+        setSeekPending({ ms: target, at: Date.now() })
+        // 本地时钟先跳到目标位置：日志落盘有 100ms 级延迟，等它就是滑块先回弹。
+        // 有真实时间轴时 posNow 走 st.now.pos（不看 nativeClock），那就直接改
+        // st.now.pos —— 否则轮询回来之前滑块会弹回旧位置。
+        nativeClock.current = { key: songKey, ms: target, at: Date.now() }
+        patchUi({ anchor: { key: songKey, t: target, at: Date.now() } })
+        setSt((prev) =>
+          prev && prev.now && Number(prev.now.end) > 0
+            ? { ...prev, now: { ...prev.now, pos: target / 1000 }, serverTime: Date.now() }
+            : prev,
+        )
+        const res = await run('seek', () => post('/action', { action: 'seek', positionMs: target }))
+        setSeekPending(null)
+        // 窗口原本被收起/最小化时，客户端会把它 show 出来；helper 会持续压制把它按回原样。
+        // 压住了就完全静默（用户不该被这种内部动作打扰），只有压不住才提示。
+        if (res && res.windowLeaked) setErr(t('seekWindowLeaked'))
+        else if (res && res.ok === false) setErr(t('seekFailed'))
+      }
+
+      const barRef = React.useRef(null)
+      const onBarPointerDown = (e) => {
+        if (e.button !== 0) return
+        if (!now || !(Number(now.end) > 0) || now.canSeek === false) return
+        const el = barRef.current
+        if (!el) return
+        // 拦下整卡拖拽：不拦的话拖进度条会把整张卡片拖着走
+        e.preventDefault()
+        e.stopPropagation()
+        const end = Number(now.end)
+        const at = (clientX) => {
+          const rect = el.getBoundingClientRect()
+          const ratio = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
+          return Math.min(end, Math.max(0, ratio * end))
+        }
+        setSeek(at(e.clientX))
+        const move = (ev) => setSeek(at(ev.clientX))
+        const up = (ev) => {
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', up)
+          window.removeEventListener('pointercancel', up)
+          const v = at(ev.clientX)
+          setSeek(null)
+          commitSeek(v * 1000)
+        }
+        window.addEventListener('pointermove', move)
+        window.addEventListener('pointerup', up)
+        window.addEventListener('pointercancel', up)
+      }
+
       // 位置：优先用拖过的绝对坐标，否则贴右下角
       const placed = slide || (ui.x !== null && ui.y !== null ? { x: ui.x, y: ui.y } : null)
       const rootStyle = placed
@@ -622,7 +713,9 @@ window.__ModuleLoader__.load({
       }
 
       // ── 展开态 ────────────────────────────────────────────────────────────
-      const progress = now && Number(now.end) > 0 ? Math.min(1, Math.max(0, posNow / Number(now.end))) : 0
+      // 拖动中 / 刚松手未确认时，用本地值算进度，别让 2 秒一次的轮询把它拽回去
+      const shownPos = seekPos !== null ? seekPos : seekPending ? seekPending.ms / 1000 : posNow
+      const progress = now && Number(now.end) > 0 ? Math.min(1, Math.max(0, shownPos / Number(now.end))) : 0
       // 高亮只在真歌词行之间走：署名行（作词/作曲/编曲/制作人）不参与定位，
       // 否则歌前那 20 秒高亮会钉在「制作人 : 光良」上一动不动。
       // 但滚动位置仍跟着署名行走，免得整块歌词条突然跳回顶部。
@@ -717,19 +810,50 @@ window.__ModuleLoader__.load({
                   : t('noLyrics')),
         ),
 
-        // 进度条（客户端不给时间轴时整行都不画）
+        // 进度条：可拖动跳转（客户端不共享时间轴时整行都不画）
         hasTimeline
-          ? h('div', { className: 'nc-bar' },
+          ? h('div', {
+              ref: barRef,
+              className: `nc-bar${seekPos !== null ? ' nc-bar-dragging' : ''}${now && now.canSeek !== false ? ' nc-bar-seekable' : ''}`,
+              onPointerDown: onBarPointerDown,
+              role: 'slider',
+              tabIndex: now && now.canSeek !== false ? 0 : -1,
+              'aria-label': t('seek'),
+              'aria-valuemin': 0,
+              'aria-valuemax': Math.round(Number(now.end)),
+              'aria-valuenow': Math.round(shownPos),
+              onKeyDown: (ev) => {
+                if (!now || now.canSeek === false) return
+                const end = Number(now.end)
+                const step = ev.shiftKey ? 10 : 5
+                let to = null
+                if (ev.key === 'ArrowLeft') to = Math.max(0, posNow - step)
+                else if (ev.key === 'ArrowRight') to = Math.min(end, posNow + step)
+                else if (ev.key === 'Home') to = 0
+                else if (ev.key === 'End') to = Math.max(0, end - 1)
+                if (to === null) return
+                ev.preventDefault()
+                ev.stopPropagation()
+                commitSeek(to * 1000)
+              },
+            },
               h('div', { className: 'nc-bar-fill', style: { width: `${progress * 100}%` } }),
+              h('div', { className: 'nc-bar-thumb', style: { left: `${progress * 100}%` } }),
             )
           : null,
         hasTimeline
           ? h('div', { className: 'nc-time' },
-              h('span', null, clock(posNow)),
+              h('span', null, clock(shownPos)),
+              // 代价声明：协议车道每次跳转都会让客户端 show 一次主窗口。
+              // 只在按住拖动的那段时间显示 —— 正好是「马上要付出代价」的时刻，
+              // 平时不占地方、也不打扰人。
+              leakWarn && seekPos !== null
+                ? h('span', { className: 'nc-time-hint nc-leak-hint', title: t('seekWindowWarn') }, t('seekWindowWarn'))
+                : null,
               h('span', null, clock(now ? now.end : 0)),
             )
           : h('div', { className: 'nc-time nc-time-min' },
-              h('span', null, clock(posNow)),
+              h('span', null, clock(shownPos)),
               h('span', null, '—'),
               h('span', { className: 'nc-time-hint' }, t('noTimeline')),
             ),
@@ -951,8 +1075,31 @@ body[data-ds-dark-theme] .nc-root{
 }
 
 /* ── 进度 ── */
-.nc-bar{height:3px;border-radius:2px;background:var(--dsw-alias-border-l1,rgba(0,0,0,.1));overflow:hidden;}
-.nc-bar-fill{height:100%;border-radius:2px;background:var(--nc-accent);transition:width .2s linear;}
+/* 把命中区做成 14px 高、轨道理在中间 —— 3px 的细条点不中，也没法拖。
+   原来是 overflow:hidden，会把 thumb 裁掉，所以改成 visible，填充自己圆角。 */
+.nc-bar{
+  position:relative;height:14px;margin:1px 0 -1px;border-radius:7px;
+  background:transparent;overflow:visible;touch-action:none;
+  cursor:default;
+}
+.nc-bar::before{
+  content:"";position:absolute;left:0;right:0;top:50%;height:3px;margin-top:-1.5px;
+  border-radius:2px;background:var(--dsw-alias-border-l1,rgba(0,0,0,.1));
+}
+.nc-bar-fill{
+  position:absolute;left:0;top:50%;height:3px;margin-top:-1.5px;
+  border-radius:2px;background:var(--nc-accent);transition:width .2s linear;
+}
+.nc-bar-thumb{display:none;}
+.nc-bar-seekable{cursor:pointer;}
+.nc-bar-seekable:hover::before{background:var(--dsw-alias-border-l2,rgba(0,0,0,.16));}
+.nc-bar.nc-bar-dragging .nc-bar-fill{transition:none;}
+.nc-bar.nc-bar-dragging .nc-bar-thumb{
+  display:block;position:absolute;top:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+  border-radius:50%;background:var(--nc-accent);box-shadow:0 1px 4px rgba(0,0,0,.25);
+  pointer-events:none;
+}
+.nc-bar-seekable:focus-visible{outline:2px solid var(--nc-accent);outline-offset:2px;}
 .nc-time{
   display:flex;justify-content:space-between;margin-top:3px;
   font-size:10px;font-variant-numeric:tabular-nums;

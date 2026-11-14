@@ -3,6 +3,39 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-14
+
+**拖进度条跳转**。`native` 车道原来 `canSeek` 恒为 false，进度条只能看；现在能拖、能按方向键、真的跳。
+
+### Added
+
+- **进度条可拖动**（`client.js`）。展开态把 `.nc-bar` 从 3 px 的展示条改成可交互滑块：命中区撑到 14 px（原来 `overflow: hidden` 会把滑块裁掉），`onPointerDown` 里 `stopPropagation` 免得拖着拖着把整张卡片拖走，拖动期间用本地值渲染、松手才 `commitSeek()` 发一次命令——不是每动一像素发一条。键盘：`←` / `→` ±5 s（`Shift` ±10 s）、`Home` / `End` 到头尾。`role="slider"` + `aria-valuemin/valuemax/valuenow` 补齐。
+- **orpheus 协议通道**（`lib/helper.ps1` 的 `SendOrpheusCommand` / `Invoke-NativeSeek`）。客户端把 `HKLM\SOFTWARE\Classes\orpheus` 注册成 `cloudmusic.exe --webcmd="%1"`，投递 `orpheus://<base64(JSON {cmd,value})>` 后第二条进程转交主进程、前端 `onWebMessage` 的 `case "seek"` → `playing/setPlayingPosition` → 原生 `DoSeek pos:N`。踩过的坑：`ShellExecuteW` 的返回值只代表「投递成功」，转交是异步的，实测 show 最晚落在 7.3 秒。
+- **`elog.noteSeek()` + `pendingSeek`**（`lib/elog.mjs`）。日志落盘比命令本身慢 60–150 ms，这段时间前端会看到「位置还在原处」并把滑块拽回去。现在 seek 成功后立刻按目标位置推算（`PENDING_SEEK_MS = 2500`、`PENDING_SEEK_TOLERANCE_MS = 1500`），`setPlayingPosition` 一到就撤销，日志接管后正常前进。
+- **`test/elog.test.mjs` 新增 5 条**：`noteSeek` 生效 / 到点撤销 / 日志接管后不再外推 / 容差外的事件不撤销 / 负数与超长钳制。`npm test` 现为 **77 条**（elog 31 + lyrics 25 + transport 21）。
+
+### Fixed
+
+- **`native` 车道不能 seek**：`canSeek` 恒为 false，进度条只展示。现在走 orpheus 协议，`#mergeElog` 的 `canSeek` 改 true，`/action {action:'seek'}` 真跳。
+- **跳进度时客户端窗口蹦到眼前**。客户端收到任何 orpheus 消息都会 `showWindow`（`app.chunk` 的 `activeWindow` effect 末尾是无条件的 `"webmsg" === t && (yield o({ type: "showWindow" }))`，`actionId` 白名单管不到这一行），所以这条路必须配宿主机侧的压制：投递前最小化/托盘态用空 region + layered `alpha=0`（**不改窗口尺寸**），可见态把 z 序插回原位；投递后起后台守卫，3 ms 高频盯到 4.2 秒、然后 40 ms 盯到 8 秒，把客户端迟到的 show 按回去、把焦点还给原窗口。三态实测：托盘态一帧不露、最小化态只在屏外动、可见态位置不动且不抢焦点。
+- **跳完进度后顶部一条 61～62 行的白带永远不消**。真身是客户端那 4 个 `WS_POPUP + WS_EX_TRANSPARENT` 的 `OrpheusShadow` 边框窗（顶边那个 1239×64，覆盖窗口顶部 32 逻辑像素）：正常状态它们压在主窗口下面只露出一圈柔化阴影，客户端从最小化 restore 时会把它们排到主窗口**上面**，于是一片纯白。z 序压底当场有效但下次 restore 会复位；`RGN_DIFF` 只能降到 13 行；nudge / invalidate / 缩放 / 显隐 / 最大化再还原全部无效或极不稳定。唯一持久的是把它们的 visible region 清空——代价是窗口外沿那圈阴影没了，用户拖进度时察觉不到。`MuteShadows()` 在投递前调用，且不恢复。
+- **1×1 park 是白带的另一半来源，已整体删除**。早期为了不让客户端 restore 到屏幕中央，把 `rcNormalPosition` 改成 `(0,0,1,1)`；CEF 会照着这份 geometry 重新 layout，等拉回 1175×940 时自绘标题栏层和那 8 个阴影窗不跟着重排。另外 `SetWindowPlacement` 在隐藏态会把窗口「写活」（`vis` 从 false 变 true，屏幕上多出一个 1×1 的小点）。现在只用 region + alpha。
+- **「用户自己点任务栏打开窗口」被按回最小化**。原来的判据一个都不成立：`GetLastInputInfo` 的 idle 会被客户端自己 show 打回 0–30 ms；「前台是 shell」在窗口被按回最小化后恒为真（静置 2 秒就误判）；「从最小化变普通窗口」客户端自己 show 也造成它。现在只认一条证据：**光标在外壳上 + 左键按着**（`CursorOnShell()` + `GetAsyncKeyState(0x01)`）。外壳判定还得回退到「光标落在 `Shell_TrayWnd` 矩形内」——本机任务栏上盖着微信的 `Qt51514QWindowIcon`，`WindowFromPoint` 命中它会让类名判定失手。
+- **守卫退出后窗口停在「可见、非最小化、挂在屏外」的透明空壳**。旧的「整个守卫只按回一次」让 `PressBacks = 1` 之后再也不管，客户端把窗口放在 `-25600, 159×27` 的占位几何上却报 `ico=False`。改成每拍都按（上限 40 次），按够次数就交给收尾去摆正；收尾改成「查到 `IsIconic` 为真为止」重试（8 次 × 40 ms）。
+- **`rcNormalPosition` 被写成最小化的假几何**。客户端某一拨 show 会顺手把 `rcNormalPosition` 写成 `-25600, 159×27`，不补的话用户下次还原出来是个 159×27 的小条、所有按钮都点不到。收尾在确认真的按回去之后，检查 `rcNormalPosition` 是否退化成 `< 200 px` 或 `<= -20000`，是就用 `SetNormalRect` 写回原矩形（最小化态下 `SetWindowPlacement` 只改 `rcNorm`、不动 `showCmd`，实测持久）。
+- **守卫收敛太早**：`QUIET_MS = 1500` 在几拨 show 之间长达 4 秒的空档里就收工，漏掉 7.3 秒那拨。改成 `elapsed >= LATE_MS(8200) && quiet >= 1500`。
+- **z 序纠正反而把窗口顶到最前**：`SetWindowPos` 的 `hWndInsertAfter = NULL` 等于 `HWND_TOP`，而 `GetWindow(hwnd, GW_HWNDNEXT)` 在窗口已经是最上层时返回 NULL。新增 `ZInsert`（NULL 时改用 `HWND_BOTTOM`）。
+- **豁免期把遮罩一起关掉**：`userGrace` 原本同时关掉 blind / ghost / MuteShadows / `needGuard`，于是「刚被用户点开过」的 8 秒里再 seek 就完全裸奔。改成只关「按回」，遮罩与 z 纠正照做（`Guard.NoPressBack`）。
+- **`needGuard` 含 `!wasFront` 导致前台时不守**：窗口正好在前台时反而不起守卫，那几拨 show 无人处理。去掉这个条件。
+- **helper 起不来时整个插件像坏了**：`lib/backend.mjs` 原来裸名 `spawn('powershell.exe')`，而某些宿主进程的 `PATH` 里没有 `C:\Windows\System32`（实测 DSH 后端 PATH 只有 Python / npm / Ollama / PortableGit），于是 `ENOENT`。现在按 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` 解析绝对路径；用户显式配了带路径的 `powershellPath` 就照用。
+- **`seek-unsupported` 的措辞**改为「车道既没有时间轴也没有 orpheus 协议通道」——它不再等价于「native 车道」。
+
+### Known limitations
+
+- 跳进度会起一个短命的 `cloudmusic.exe`：协议命令要走客户端自己的 `--webcmd` 入口，第二条进程把消息转交主进程后约 1 秒内自行退出（日志 `orpheus_runner.cpp(535)] Another client is exist.`）。松手才发一次，不是连续发。
+- 跳进度时会短暂压制客户端窗口（客户端收到消息必弹窗，见上）。托盘态一帧不露，最小化态只在屏外动。
+- 清空 `OrpheusShadow` 的 region 之后，窗口外沿那圈柔化阴影**不再恢复**——恢复即刻白边就回来。用户拖进度时察觉不到。
+
 ## [0.2.0] - 2026-11-08
 
 首个公开版本（0.1.0 是内部开发版，未曾发布到 npm，也没有对外仓库）。
