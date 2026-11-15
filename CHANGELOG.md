@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-15
+
+**播放顺序切换**。展开态控制行最左多了个模式按钮（上一首左边）：点一下在 顺序 → 列表循环 → 单曲循环 → 随机 里循环，图标和 tooltip 跟着当前态变，和客户端自己的循环顺序一致。
+
+### Added
+
+- **`set_mode` 动作**（`lib/player.mjs` / `index.js` / `client.js`）。`value` 取 `cycle`（列表循环）/ `single`（单曲循环）/ `random`（随机）/ `order`（顺序），非法值回 `bad-mode`；成功返回 `{ok, value, mode, now, volume}`，`now.mode` 是 elog 读回的客户端枚举（`playOrder` / `playCycle` / `playOneCycle` / `playRandom`）。
+- **`setMode` 助手命令**（`lib/helper.ps1` 的 `Invoke-NativeMode`）。投 `{"cmd":"mode","value":...}` webcmd（客户端 73.chunk 的 `case"mode"` → `playing/switchPlayingMode`），窗口压制与 seek 同一套。
+- **`elog` 的 mode 解析**（`lib/elog.mjs`）。客户端切模式会写一条 `【playing】,"播放模式切换","旧播放模式::","x","新播放模式::","y"` 日志，`classifyLine` 归为 `mode` 事件，`#apply` 用 `/新播放模式::","(\w+)"/` 取新值，`getState()` 返回 `mode`。注意客户端枚举与 webcmd 短值是两套词：`playOneCycle` ↔ `single`。
+- **面板按钮**（`client.js`）。`nc-ctrl` 行 prev 键之前插了 `nc-mode-btn`：四个 SVG 图标（顺序横线箭头 / 双循环 / 单曲循环带 1 / 交叉随机）按 `now.mode` 查表显示，`title` 拼当前文案，点击发 `set_mode` + 下一个值。`mode-no-client` / `mode-failed` 错误在底部 `nc-err` 显示人话。收起态 return 在更上面，天然不出现。
+- **测试**。elog 2 条（classifyLine 识别 + Watcher 提取 mode）、daily.test 5 条（bad-mode / 成功回填 / no-client / 透传 / 抛错）。`npm test` 现为 **112 条**。
+
+### Known limitations
+
+- **模式读数来自客户端日志**：客户端从启动到第一次切模式之间不写任何模式日志，`now.mode` 是空串，面板按「顺序」兜底显示——此时图标可能和客户端实际状态不一致，点一下就同步了。
+- **SMTC 读不到模式**：网易云 3.1.43 不注册 SMTC 会话，`configCenter` 等本地缓存也不持久化播放模式，所以 elog 是唯一可靠的读数来源。
+
 ## [0.4.0] - 2026-11-15
 
 **一键播放日推**。展开态多了一个「今日推荐」小按钮：点一下就把客户端队列换成今天的每日推荐、从第一首开始播。数据不是猜的，是插件用客户端自己的登录态去拉的。

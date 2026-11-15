@@ -2930,6 +2930,34 @@ function Invoke-PlayDaily($target, $req) {
   }
 }
 
+# 切换播放顺序：走 orpheus:// 投一条 mode webcmd。
+#
+# 客户端 onWebMessage 的 case "mode" 只认 value 是
+#   cycle（列表循环） / single（单曲循环） / random（随机） / order（顺序），
+# 对应内部枚举 playCycle / playOneCycle / playRandom / playOrder。
+# 客户端收到后 switchPlayingMode saga 会写一条「播放模式切换」日志，
+# 宿主据此刷新图标；窗口压制复用 SendOrpheusCommand 那一套。
+function Invoke-NativeMode($target, [string]$value) {
+  if ($value -ne 'cycle' -and $value -ne 'single' -and $value -ne 'random' -and $value -ne 'order') {
+    return @{ ok = $false; channel = 'native'; error = 'bad-mode'; detail = "unknown mode: $value" }
+  }
+  try {
+    [void][NcmWin.Win]::Title($target.pid)
+    try { [void][NcmWin.Win]::Heal($target.pid) } catch { }
+    $json = '{"cmd":"mode","value":"' + $value + '"}'
+    $r = [NcmWin.Win]::SendOrpheusCommand($json)
+    if ($r -ne $null -and $r.StartsWith('sent')) {
+      Start-Sleep -Milliseconds 120
+      [NcmWin.Win]::Invalidate()
+      Set-Quiet $QUIET_MS $true
+      return @{ ok = $true; channel = 'native'; error = ''; value = $value; quietMs = $QUIET_MS }
+    }
+    return @{ ok = $false; channel = 'native'; error = 'mode-failed'; detail = [string]$r }
+  } catch {
+    return @{ ok = $false; channel = 'native'; error = 'mode-failed'; detail = $_.Exception.Message }
+  }
+}
+
 
 # 系统端点音量。原来这段内联在 Get-Volume 的退路里；现在两路读数各要一份，
 # 抽出来单独调用（每次几十微秒，比重新枚举会话便宜得多）。
@@ -3236,6 +3264,26 @@ while ($running) {
             if ($now2 -eq $null) { $now2 = Read-Native }
             $reply.now = $now2
           }
+        }
+      }
+
+      # setMode：切换播放顺序。value 白名单 cycle/single/random/order。
+      # 客户端收到后写「播放模式切换」日志，宿主从 elog 读新模式刷新图标。
+      'setMode' {
+        $t = Get-NativeTarget
+        if ($t -eq $null) {
+          $reply.ok = $false
+          $reply.channel = ''
+          $reply.error = 'no-client'
+          $reply.detail = '网易云客户端没在运行'
+        } else {
+          $r = Invoke-NativeMode $t ([string]$req.value)
+          $reply.ok = $r.ok
+          $reply.channel = $r.channel
+          if (-not $r.ok) { $reply.error = $r.error }
+          if ($r.detail) { $reply.detail = [string]$r.detail }
+          if ($r.value) { $reply.value = [string]$r.value }
+          if ($r.quietMs) { $reply.quietMs = [int]$r.quietMs }
         }
       }
 

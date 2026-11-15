@@ -1,6 +1,6 @@
 {
   "name": "dsh-cloudmusic-player",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "DSH 悬浮播放器：联动本地网易云音乐客户端，调音量 / 切歌 / 跳进度 / 滚动歌词 / 一键日推",
   "keywords": [
     "dsh",

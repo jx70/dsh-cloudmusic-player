@@ -91,6 +91,12 @@ window.__ModuleLoader__.load({
         dailyUnavailable: '这台机器还没接日推',
         dailyFailed: '客户端没接住日推指令',
         dailyWindowWarn: '切日推会短暂唤起播放器窗口',
+        modeTitle: '播放顺序',
+        modeOrder: '顺序',
+        modeCycle: '列表循环',
+        modeSingle: '单曲循环',
+        modeRandom: '随机',
+        modeNoClient: '没找到播放器，先打开网易云',
         settings: '设置',
       },
       en: {
@@ -137,6 +143,12 @@ window.__ModuleLoader__.load({
         dailyUnavailable: 'Daily picks are not wired up on this machine',
         dailyFailed: 'The client did not take the daily command',
         dailyWindowWarn: 'Switching to daily picks briefly pulls the player window up',
+        modeTitle: 'Play order',
+        modeOrder: 'Sequential',
+        modeCycle: 'List loop',
+        modeSingle: 'Single loop',
+        modeRandom: 'Shuffle',
+        modeNoClient: 'No player found — open NetEase first',
         settings: 'Settings',
       },
     }
@@ -300,6 +312,37 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M9 18V6.5l10-2v11' }),
         h('circle', { cx: 6.5, cy: 18, r: 2.6 }),
         h('circle', { cx: 16.5, cy: 15.5, r: 2.6 }),
+      )
+    // 播放顺序四态图标。MODE 枚举→图标在 MiniPlayer 里查表，这里只画形状。
+    const ModeOrderIcon = () =>
+      h(
+        Svg,
+        null,
+        h('path', { d: 'M4 7h13M4 12h13M4 17h9' }),
+        h('path', { d: 'M14 9.5L17 12l-3 2.5' }),
+      )
+    const ModeCycleIcon = () =>
+      h(
+        Svg,
+        null,
+        h('path', { d: 'M4 12a8 8 0 0113.7-5.7M4 12V6M4 12h6' }),
+        h('path', { d: 'M20 12a8 8 0 01-13.7 5.7M20 12v6M20 12h-6' }),
+      )
+    const ModeSingleIcon = () =>
+      h(
+        Svg,
+        null,
+        h('path', { d: 'M4 12a8 8 0 0113.7-5.7M4 12V6M4 12h6' }),
+        h('path', { d: 'M20 12a8 8 0 01-13.7 5.7M20 12v6M20 12h-6' }),
+        h('text', { x: 12, y: 14, textAnchor: 'middle', fontSize: 7, fontWeight: 700, fill: 'currentColor', stroke: 'none' }, '1'),
+      )
+    const ModeRandomIcon = () =>
+      h(
+        Svg,
+        null,
+        h('path', { d: 'M16 4h4v4M4 20l6-6' }),
+        h('path', { d: 'M18 8h-3.5a6 6 0 00-4.7 2.2L6.5 13.6A6 6 0 011.8 15.8' }),
+        h('path', { d: 'M14 14.2l6 5.8M16 4v6' }),
       )
 
     // ── 组件 ────────────────────────────────────────────────────────────────
@@ -722,8 +765,9 @@ window.__ModuleLoader__.load({
       }
       const dailyKey = err && DAILY_TEXT[err] ? DAILY_TEXT[err] : ''
       const dailyErrText = dailyKey ? t(dailyKey) : ''
-      // 非日推的错误照旧原样显示；日推的走上面那句翻译
-      const errText = dailyErrText || err
+      // 播放顺序的错误也走人话提示；非日推/非顺序的错误照旧原样显示
+      const modeErrText = err === 'mode-no-client' || err === 'mode-failed' ? t('modeNoClient') : ''
+      const errText = dailyErrText || modeErrText || err
 
       // 收起态：只留一个胶囊
       if (ui.collapsed) {
@@ -801,6 +845,30 @@ window.__ModuleLoader__.load({
 
       // 网易云客户端不给系统时间轴时，进度条和时长都没有意义 —— 别画一条永远 0% 的假进度
       const hasTimeline = !!(now && Number(now.end) > 0)
+
+      // ── 播放顺序 ──────────────────────────────────────────────────────────
+      // 客户端枚举（elog「播放模式切换」日志里的「新播放模式」）→ 前端短值/图标/文案。
+      // 非心动模式的循环顺序：顺序 → 列表循环 → 单曲循环 → 随机。
+      const MODE_ORDER = ['playOrder', 'playCycle', 'playOneCycle', 'playRandom']
+      const MODE_SHORT = { playOrder: 'order', playCycle: 'cycle', playOneCycle: 'single', playRandom: 'random' }
+      const MODE_ICON = {
+        playOrder: ModeOrderIcon,
+        playCycle: ModeCycleIcon,
+        playOneCycle: ModeSingleIcon,
+        playRandom: ModeRandomIcon,
+      }
+      const MODE_LABEL = {
+        playOrder: 'modeOrder',
+        playCycle: 'modeCycle',
+        playOneCycle: 'modeSingle',
+        playRandom: 'modeRandom',
+      }
+      // elog 没读到模式（客户端从没切过）就按「顺序」兜底显示
+      const curMode = now && now.mode && MODE_ORDER.includes(now.mode) ? now.mode : 'playOrder'
+      const nextMode = () => {
+        const i = MODE_ORDER.indexOf(curMode)
+        return MODE_SHORT[MODE_ORDER[(i + 1) % MODE_ORDER.length]]
+      }
 
       const subtitle = (() => {
         if (err) return t('helperDownHint')
@@ -911,6 +979,12 @@ window.__ModuleLoader__.load({
         // 控制行
         h('div', { className: 'nc-ctrl' },
           h('button', {
+            className: 'nc-iconbtn nc-mode-btn',
+            title: `${t('modeTitle')} · ${t(MODE_LABEL[curMode])}`,
+            disabled: busy !== '' || unsupported,
+            onClick: () => act('set_mode', { value: nextMode() }),
+          }, h(MODE_ICON[curMode])),
+          h('button', {
             className: 'nc-iconbtn',
             title: t('prev'),
             disabled: busy !== '' || !now || now.canPrev === false,
@@ -928,6 +1002,8 @@ window.__ModuleLoader__.load({
             disabled: busy !== '' || !now || now.canNext === false,
             onClick: () => act('next'),
           }, h(NextIcon)),
+          // 对称占位：左侧多了模式按钮，右侧补一个等宽透明块，主播放键才能回到正中央
+          h('span', { className: 'nc-ctrl-spacer' }),
           err || degraded
             ? h('button', { className: 'nc-iconbtn nc-retry', title: t('retry'), disabled: busy !== '', onClick: retry }, h(RefreshIcon))
             : null,
@@ -1187,6 +1263,11 @@ body[data-ds-dark-theme] .nc-root{
 }
 .nc-iconbtn:active:not(:disabled){transform:scale(.94);}
 .nc-iconbtn:disabled{opacity:.32;cursor:default;}
+
+/* 播放顺序按钮：跟 prev/next 一样是 28px 图标，但图标小一号，别跟主键抢戏 */
+.nc-mode-btn svg{width:15px;height:15px;}
+/* 右侧对称占位：抵消左侧模式按钮的宽度，让主播放键回到正中央 */
+.nc-ctrl-spacer{width:28px;height:28px;flex:0 0 auto;}
 
 /* 主按钮：实心强调色 + 与之对比的图标色。
    两个颜色都来自本插件变量，不引用 brand-primary（那个在深色下是白色）。 */

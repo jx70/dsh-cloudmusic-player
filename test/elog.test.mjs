@@ -221,6 +221,31 @@ test('classifyLine：nativePlay / refreshCurPlaying 单独归为 trackmeta', () 
   assert.equal(classifyLine(',"-------nativePlay，用户音效设置开关：false ，音效名字3D环绕"'), null)
 })
 
+test('classifyLine 识别播放模式切换', () => {
+  assert.equal(classifyLine(',"播放模式切换","旧播放模式::","playOrder","新播放模式::","playCycle"').type, 'mode')
+  assert.equal(classifyLine(',"播放模式切换","旧播放模式::","playCycle","新播放模式::","playOneCycle"').type, 'mode')
+  assert.equal(classifyLine(',"播放模式切换","旧播放模式::","playOrder","新播放模式::","playRandom"').type, 'mode')
+  assert.equal(classifyLine(',"播放模式切换","旧播放模式::","playOrder","新播放模式::","playOrder"').type, 'mode')
+  assert.equal(classifyLine(',"unrelated 播放模式切换"'), null)
+})
+
+test('Watcher 从模式日志提取 mode', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine({ id: '1', name: 'a', artist: 'b', duration: 100_000 }, 0),
+    startedLine('1', 100_000, 0),
+    line(',"播放模式切换","旧播放模式::","playOrder","新播放模式::","playCycle"', 0),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    const s = w.getState()
+    assert.equal(s.mode, 'playCycle')
+  } finally {
+    w.stop()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Watcher：主流程
 // ---------------------------------------------------------------------------

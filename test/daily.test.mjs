@@ -406,3 +406,52 @@ test('play_daily：连点两次只投一次（in-flight 合并）', async () => 
   assert.equal(b.deduped, true)
   assert.equal(player.sent.length, 1, '第二次不应该再投 playDaily')
 })
+
+// ---------------------------------------------------------------------------
+// PlayerService.set_mode
+// ---------------------------------------------------------------------------
+
+test('set_mode：非法 value 给 bad-mode，不发请求', async () => {
+  const player = fakePlayer({ daily: null, reply: { ok: true } })
+  const res = await player.action('set_mode', { value: 'shuffle' })
+  assert.equal(res.ok, false)
+  assert.equal(res.error, 'bad-mode')
+  assert.equal(player.sent.length, 0)
+})
+
+test('set_mode：成功投 setMode，回填 value 与 mode', async () => {
+  const player = fakePlayer({ daily: null, reply: { ok: true, channel: 'native' } })
+  player.state = async () => ({ ok: true, now: { mode: 'playCycle' }, volume: null })
+  const res = await player.action('set_mode', { value: 'cycle' })
+  assert.equal(res.ok, true)
+  assert.equal(res.value, 'cycle')
+  assert.equal(res.mode, 'playCycle')
+  assert.equal(player.sent.length, 1)
+  assert.equal(player.sent[0].cmd, 'setMode')
+  assert.deepEqual(player.sent[0].payload, { value: 'cycle' })
+})
+
+test('set_mode：客户端没开 → mode-no-client', async () => {
+  const player = fakePlayer({ daily: null, reply: { ok: false, error: 'no-client', detail: '网易云客户端没在运行' } })
+  const res = await player.action('set_mode', { value: 'random' })
+  assert.equal(res.ok, false)
+  assert.equal(res.error, 'mode-no-client')
+  assert.match(res.message, /打开/)
+})
+
+test('set_mode：helper 其它错误 → 透传错误码', async () => {
+  const player = fakePlayer({ daily: null, reply: { ok: false, error: 'mode-failed', detail: 'x' } })
+  const res = await player.action('set_mode', { value: 'order' })
+  assert.equal(res.ok, false)
+  assert.equal(res.error, 'mode-failed')
+})
+
+test('set_mode：请求抛异常 → 走 #failure', async () => {
+  const player = fakePlayer({ daily: null, reply: null })
+  player.request = async () => {
+    throw new Error('boom')
+  }
+  const res = await player.action('set_mode', { value: 'single' })
+  assert.equal(res.ok, false)
+  assert.equal(res.error, 'helper-unavailable')
+})

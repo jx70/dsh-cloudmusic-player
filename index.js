@@ -307,7 +307,10 @@ export function apply(ctx, config) {
         const body = await readJson(request)
         if (!body) return jsonResponse({ ok: false, error: 'bad-body' }, 400)
         const action = String(body.action || '').trim()
-        const result = await player.action(action, { positionMs: num(body.positionMs, 0) })
+        const result = await player.action(action, {
+          positionMs: num(body.positionMs, 0),
+          value: body.value == null ? undefined : String(body.value),
+        })
         return jsonResponse(result)
       }),
     },
@@ -458,20 +461,27 @@ export function apply(ctx, config) {
         '控制本机网易云音乐客户端：播放/暂停/切歌、跳进度、调音量（默认只调网易云自己的音量，不动系统总音量）、'
         + '看当前在放什么。还可以取当前这首歌的歌词（带时间轴，LRC 解析后的行数组）。'
         + 'play_daily 会把它切到「每日推荐」并从第一首开始播（借客户端已登录的 cookie 取日推列表）。'
+        + 'set_mode 切换播放顺序（顺序/列表循环/单曲循环/随机）。'
         + '客户端没开时会返回 ok:false 与提示，不抛错。',
       parameters: {
         type: 'object',
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health', 'play_daily'],
+            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health', 'play_daily', 'set_mode'],
             description:
               '要做什么。status 看当前状态；volume 需要 level；mute 需要 muted；seek 需要 positionMs；'
-              + 'play_daily 播放每日推荐（替换队列，从第一首开始）',
+              + 'play_daily 播放每日推荐（替换队列，从第一首开始）；'
+              + 'set_mode 切换播放顺序（value 取 cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序）',
           },
           positionMs: { type: 'integer', description: 'seek 的目标位置（毫秒）' },
           level: { type: 'number', description: 'volume 的目标音量，0..1' },
           muted: { type: 'boolean', description: 'mute 的目标状态' },
+          value: {
+            type: 'string',
+            enum: ['cycle', 'single', 'random', 'order'],
+            description: 'set_mode 的目标播放顺序：cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序',
+          },
           scope: {
             type: 'string',
             enum: ['process', 'system'],
@@ -596,6 +606,14 @@ export function apply(ctx, config) {
                 describe({ ok: true, now: res.now, volume: res.volume }),
               ].filter(Boolean).join('\n'),
             }
+          }
+          if (action === 'set_mode') {
+            const value = String(args?.value || '').trim()
+            const labels = { cycle: '列表循环', single: '单曲循环', random: '随机', order: '顺序' }
+            if (!labels[value]) return { text: 'set_mode 需要 value（cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序）。' }
+            const res = await player.action('set_mode', { value })
+            if (!res.ok) return { text: `切换播放顺序失败：${res.message || res.error || 'unknown'}${res.detail ? ` (${res.detail})` : ''}` }
+            return { text: `播放顺序已切到 ${labels[value]}。` }
           }
           const res = await player.action(action, { positionMs: num(args?.positionMs, 0) })
           if (!res.ok) {
