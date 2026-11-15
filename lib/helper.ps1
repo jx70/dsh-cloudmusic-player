@@ -782,6 +782,50 @@ namespace NcmWin
             catch { }
         }
 
+        /// <summary>
+        /// 找该进程真正的主窗口（CEF 那个）。
+        ///
+        /// `Title()` 挑的是「最像 歌名 - 歌手」的窗口，它是给读曲目用的，
+        /// 不保证就是主窗口；隐藏态的桌面歌词 / 迷你播放器 / 系统提示窗都可能
+        /// 得分更高。压窗口那套逻辑要是作用在一个非主窗口上，读到的是它自己的
+        /// 可见性（通常是隐藏），于是 `HiddenBefore=true` —— 守卫会照着这个去
+        /// `ShowWindow(hwnd,0)`，而用户眼前那扇主窗口的状态没人管。反过来，
+        /// 主窗口明明开着却被判成「本来藏着」，收尾时也只是把它原样藏回去，
+        /// 用户看到的就是「客户端窗口被关了」。
+        ///
+        /// 所以这里按类名认人：OrpheusBrowserHost 是主窗本体，Chrome_WidgetWin*
+        /// 是 CEF 的次一级容器，其余 Orpheus* 只当兜底。同类里可见的优先、
+        /// 面积大的优先 —— 主窗永远比影子窗/歌词窗大。
+        /// </summary>
+        static IntPtr FindMainWindow(uint pid)
+        {
+            if (pid == 0) return IntPtr.Zero;
+            IntPtr best = IntPtr.Zero;
+            long bestScore = long.MinValue;
+            foreach (IntPtr h in ProcessWindows(pid, null))
+            {
+                System.Text.StringBuilder cls = new System.Text.StringBuilder(256);
+                GetClassNameW(h, cls, cls.Capacity);
+                string cn = cls.ToString();
+                long score;
+                if (string.Equals(cn, "OrpheusBrowserHost", StringComparison.OrdinalIgnoreCase)) { score = 100000L; }
+                else if (cn.StartsWith("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase)) { score = 50000L; }
+                else if (cn.StartsWith("Orpheus", StringComparison.OrdinalIgnoreCase)) { score = 1000L; }
+                else { continue; }
+                if (IsWindowVisible(h)) { score += 30000L; }
+                RECT r = new RECT();
+                if (GetWindowRect(h, ref r))
+                {
+                    long w = r.Right - r.Left;
+                    long ht = r.Bottom - r.Top;
+                    if (w < 200 || ht < 200) { score -= 20000L; }
+                    score += (w * ht) / 10000L;
+                }
+                if (score > bestScore) { bestScore = score; best = h; }
+            }
+            return best;
+        }
+
         /// <summary>枚举某进程的顶层窗口；cls 为空表示不过滤类名。</summary>
         static IntPtr[] ProcessWindows(uint pid, string cls)
         {
@@ -840,6 +884,36 @@ namespace NcmWin
             if (!needGhostDrop) return;
             try { UnghostAll(hw, pid); } catch { }
             if (_ghostOwner == gen) { _ghostOwner = 0; }
+        }
+
+        /// <summary>
+        /// 收拾没有人认领的整窗透明。
+        ///
+        /// 不变量是「_ghostOwner == 0 ⟺ 没有任何一代守卫打算继续遮着」。一旦
+        /// owner 是 0、窗口却还是 alpha=0，那就是遗留态：守卫被顶替、后端重启、
+        /// 会话结束都能留下它。这时候窗口在屏幕上、进程也在跑，可一个像素都不画，
+        /// 用户唯一的感受就是「客户端窗口被关掉了」。
+        ///
+        /// 只在 owner 为 0 时动手：owner 不为 0 说明别的守卫正打算遮着，放开会
+        /// 让那一代白遮，窗口闪一下。
+        /// </summary>
+        static void DropOrphanGhost(IntPtr main, uint pid)
+        {
+            if (_ghostOwner != 0) return;
+            if (main == IntPtr.Zero || pid == 0) return;
+            try
+            {
+                bool any = IsGhost(main);
+                if (!any)
+                {
+                    foreach (IntPtr sh in ProcessWindows(pid, "OrpheusShadow"))
+                    {
+                        if (IsGhost(sh)) { any = true; break; }
+                    }
+                }
+                if (any) { UnghostAll(main, pid); }
+            }
+            catch { }
         }
 
         // ---- 屏蔽 OrpheusShadow 边框窗 ----------------------------------------
@@ -1366,7 +1440,37 @@ namespace NcmWin
             string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
             // 先确保 _lastHwnd 有效：没扫过窗口就先扫一次，否则判断不了最小化/前台
             if (_lastHwnd == IntPtr.Zero) { try { EnumAnyWindow(); } catch { } }
-            IntPtr hwnd = _lastHwnd;
+
+            // 认准主窗，别用 Title() 挑出来的那个。
+            //
+            // `_lastHwnd` 来自 Title() 的打分（它挑的是「最像 歌名 - 歌手」的窗口，
+            // 给读曲目用的）。压窗口这套东西拿它当主角就会出事：那是影子窗/歌词窗
+            // 时，它自己的可见性通常是隐藏 → wasHidden=true → 守卫拿着
+            // `ShowWindow(hwnd,0)` 去藏它（本来就是藏的，无事发生），用户眼前那扇
+            // 真窗口状态没人管；反过来主窗明明开着，收尾也只把它按回「原来的隐藏
+            // 态」。用户看到的就是「客户端窗口被关掉了」。
+            //
+            // 认不出主窗（进程没起、类名变了）才退回 _lastHwnd，保持旧行为。
+            IntPtr hwnd = IntPtr.Zero;
+            if (_lastPid > 0) { try { hwnd = FindMainWindow((uint)_lastPid); } catch { hwnd = IntPtr.Zero; } }
+            if (hwnd == IntPtr.Zero) { hwnd = _lastHwnd; }
+            if (hwnd != IntPtr.Zero)
+            {
+                // 主窗认出来了就认它，后续读到的是主窗的状态。
+                // 注意别在这儿调 Title()/TitleCached()：它们会把 _lastHwnd 改回
+                // 「最像歌名的那扇窗」，刚认的主窗又丢了。
+                _lastHwnd = hwnd;
+            }
+
+            // 上一代守卫要是把窗口留在 alpha=0 上、owner 又已经归零，这里先收拾掉。
+            // 不收拾的后果是连环的：下面读到的 wasVisible=false 会被判成「用户把它
+            // 藏起来了」，于是又叠一层 Blind + Ghost，越陷越深；用户那边看到的是
+            // 客户端窗口「被关掉」（进程还在、窗口也在，就是一个像素都不画）。
+            if (hwnd != IntPtr.Zero && _lastPid > 0)
+            {
+                try { DropOrphanGhost(hwnd, (uint)_lastPid); } catch { }
+            }
+
             bool iconic = hwnd != IntPtr.Zero && IsIconic(hwnd);
             bool zoomed = hwnd != IntPtr.Zero && !iconic && IsZoomed(hwnd);
             bool wasVisible = hwnd != IntPtr.Zero && IsWindowVisible(hwnd);
@@ -1488,11 +1592,18 @@ namespace NcmWin
             // 放在投递前：restore 是客户端收到消息之后才做的，先把 shadow 弄哑，
             // 它 restore 时就没有白像素可画。
             //
-            // 只对「本来就不在屏幕上」的窗口做：窗口正常摆在屏幕上时客户端不会
-            // 走 restore 那条路径，边框窗也不会被挪到窗口内侧，白边根本不会出现 ——
-            // 那种情况下去动用户的窗口外观是多余的（这层阴影是客户端自己画的，
-            // 弄哑之后窗口外沿那圈柔化阴影就没了）。
-            if (hwnd != IntPtr.Zero && ghostPid != 0 && (iconic || wasHidden))
+            // 2026-11-15 补正：以前这里限定「只对本来就不在屏幕上的窗口做」，
+            // 理由是「窗口正常摆在屏幕上时客户端不会走 restore，白边不会出现」。
+            // 实测否掉了这条前提 —— 客户端开着、窗口完整可见（首页推荐页摊在那里），
+            // 发一条 webcmd 之后它会自己走一遍 restore，4 个 OrpheusShadow 被重排到
+            // 主窗内侧上方，屏幕顶部留下一条 80px 高的纯白带（截图采样 x=1500：
+            // y=69..148 全是 255,255,255，白带下沿紧贴客户端标题栏）。
+            // 这条白带不会自己消失，会一直挂到用户手动挪窗口为止。
+            //
+            // 所以改成**只要发 orpheus 消息就先把边框窗弄哑**。代价仍然是窗口外沿那圈
+            // 32px 柔化阴影没了（MuteShadows 不恢复，见 880 行的说明），
+            // 比顶部一条 80px 白带划算得多。
+            if (hwnd != IntPtr.Zero && ghostPid != 0)
             {
                 try { MuteShadows(ghostPid); } catch { }
             }
@@ -1720,8 +1831,20 @@ namespace NcmWin
                     {
                         // 被新的 seek 顶掉了，收尾交给它。可见区域如果还是我们遮的
                         // 那份，得自己放开；新一代已经重新遮过就别动（owner 判定）。
+                        //
+                        // 注意 owner 的归属：只有**自己还是 owner**时才撤销并清零。
+                        // 早先这行 `_ghostOwner = 0;` 写在 if 花括号外面，等于不管
+                        // 谁遮的都一律清零 —— 新一代刚把 owner 设成自己，立刻被上一代
+                        // 抹掉，于是它的收尾条件 `_ghostOwner == g.Gen` 永远不成立，
+                        // 谁都不会去 UnghostAll，窗口就永久停在 alpha=0（一个像素都不画，
+                        // 用户看到的就是「客户端窗口没了」）。play_daily 一次发三条
+                        // webcmd，正好触发这条路径。
                         if (g.Blinded && _blindOwner == g.Gen) { try { Unblind(g.Hwnd); } catch { } }
-                        if (g.Ghosted && _ghostOwner == g.Gen) { try { UnghostAll(g.Hwnd, g.Pid); } catch { } _ghostOwner = 0; }
+                        if (g.Ghosted && _ghostOwner == g.Gen)
+                        {
+                            try { UnghostAll(g.Hwnd, g.Pid); } catch { }
+                            _ghostOwner = 0;
+                        }
                         superseded = true;
                         break;
                     }
@@ -1892,6 +2015,10 @@ namespace NcmWin
                 if (g.UserTook) { try { FinishUserTook(g); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine("cloudmusic-player finish user: " + ex.Message); } }
                 else { try { FinishGuard(g); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine("cloudmusic-player finish guard: " + ex.GetType().Name + ": " + ex.Message); } }
             }
+            // 不管收尾走的是哪条支路、有没有被顶替，最后都查一遍「有没有人认领
+            // 的透明层」。三代守卫交叉时 owner 会被顶来顶去，只要漏一次，窗口就
+            // 永久停在 alpha=0 —— 用户看到的就是客户端窗口没了。
+            try { DropOrphanGhost(g.Hwnd, g.Pid); } catch { }
         }
 
         /// <summary>
@@ -2715,6 +2842,95 @@ function Invoke-NativeSeek($target, [int]$seekMs) {
   }
 }
 
+# 一次投递两条 orpheus 消息：先 play 第一首（替换队列），再 playingList/addToNext 追加其余。
+#
+# 为什么是这个组合：客户端 3.1.43 的 onWebMessage switch 里没有「播放日推」这种命令，
+# 能触发日推 playAll 的只有 native 推给渲染层的 systemUIHint，外部伪造不了。
+# 实测可用的是这两条：
+#   {"cmd":"play","type":"song","id":"<id>"}          → doAction play，替换队列并起播
+#   {"cmd":"playingList","type":"addToNext","value":[...]} → playing/play options.clear=false
+# 语义合起来就是「切到日推歌单、从第一首开始」。
+#
+# 窗口压制完全复用 SendOrpheusCommand 里那一套（Blind/Ghost/MuteShadows/Guard），
+# 所以这里只负责拼 JSON、记账、收尾。
+function Invoke-PlayDaily($target, $req) {
+  $first = [string]$req.first
+  if ([string]::IsNullOrWhiteSpace($first)) {
+    return @{ ok = $false; channel = 'native'; error = 'bad-ids'; detail = 'empty song id' }
+  }
+  $ids = @()
+  if ($req.ids -ne $null) { foreach ($i in $req.ids) { $s = [string]$i; if ($s -ne '') { $ids += $s } } }
+  if ($ids.Count -eq 0) { $ids = @($first) }
+
+  try {
+    [void][NcmWin.Win]::Title($target.pid)
+    try { [void][NcmWin.Win]::Heal($target.pid) } catch { }
+
+    $playJson = '{"cmd":"play","type":"song","id":"' + $first + '"}'
+    $r1 = [NcmWin.Win]::SendOrpheusCommand($playJson)
+    if ($r1 -eq $null -or -not $r1.StartsWith('sent')) {
+      return @{ ok = $false; channel = 'native'; error = 'play-failed'; detail = [string]$r1 }
+    }
+    $parts = $r1.Split('|')
+    $iconic = ($parts.Length -gt 1 -and $parts[1] -eq '1')
+    $wasFront = ($parts.Length -gt 2 -and $parts[2] -eq '1')
+    $wasHidden = ($parts.Length -gt 4 -and $parts[4] -eq '1')
+
+    # 客户端收到 play 之后要去拉曲目详情才会真的换队列；紧接着发 addToNext
+    # 有可能命中「队列还没换完」的中间态，等一下更稳。
+    Start-Sleep -Milliseconds 420
+
+    # 首曲正好就是「此刻在播的那首」时，play 会被客户端当成「已经在放了」而
+    # 完全不动 —— 尤其是这首刚好停在结尾（实测 pos 会一直卡在 dur 上、状态还是
+    # Playing），用户看到的就是「按了日推毫无反应，歌词歌手也没换」。
+    # 上层（player.mjs）比对过 elog 的 songId 才会置 restart，这里只负责回到 0。
+    $restarted = $false
+    if ($req.restart -eq $true) {
+      $rSeek = [NcmWin.Win]::SendOrpheusCommand('{"cmd":"seek","value":0}')
+      $restarted = ($rSeek -ne $null -and $rSeek.StartsWith('sent'))
+      Start-Sleep -Milliseconds 160
+    }
+
+    # play 只负责换队列，遇到「这首正好停在结尾」时它不会自己重新起播
+    # （实测：同一首歌已经播到尾再发 play，pos 会留在 dur 上不动），
+    # 所以补一条 resume —— 已经在放的时候它是幂等的，不会打断。
+    $rResume = [NcmWin.Win]::SendOrpheusCommand('{"cmd":"resume"}')
+    $resumed = ($rResume -ne $null -and $rResume.StartsWith('sent'))
+
+    $rest = @($ids | Select-Object -Skip 1)
+    $queued = 0
+    if ($rest.Count -gt 0) {
+      $quoted = ($rest | ForEach-Object { '"' + $_ + '"' }) -join ','
+      $listJson = '{"cmd":"playingList","type":"addToNext","value":[' + $quoted + ']}'
+      $r2 = [NcmWin.Win]::SendOrpheusCommand($listJson)
+      if ($r2 -ne $null -and $r2.StartsWith('sent')) { $queued = $rest.Count }
+    }
+
+    Start-Sleep -Milliseconds 150
+    [NcmWin.Win]::Invalidate()
+    Set-Quiet $QUIET_MS $true
+
+    $out = @{
+      ok = $true
+      channel = 'native'
+      error = ''
+      first = $first
+      total = $ids.Count
+      queued = $queued
+      resumed = $resumed
+      restarted = $restarted
+      quietMs = $QUIET_MS
+    }
+    if ($iconic -or $wasHidden) { $out.restored = $true }
+    if ($wasHidden) { $out.wasHidden = $true }
+    if (-not $wasFront) { $out.detached = $true }
+    return $out
+  } catch {
+    return @{ ok = $false; channel = 'native'; error = 'play-failed'; detail = $_.Exception.Message }
+  }
+}
+
+
 # 系统端点音量。原来这段内联在 Get-Volume 的退路里；现在两路读数各要一份，
 # 抽出来单独调用（每次几十微秒，比重新枚举会话便宜得多）。
 function Get-SystemVolume() {
@@ -2986,6 +3202,40 @@ while ($running) {
           }
           if ($now2 -eq $null) { $now2 = Read-Native }
           $reply.now = $now2
+        }
+      }
+
+      # playDaily：插件已经自己拿好日推列表了（客户端 webcmd 里没有这号命令），
+      # 这里只负责把「第一首 + 其余」两条消息投进客户端，并复用窗口压制。
+      'playDaily' {
+        $t = Get-NativeTarget
+        if ($t -eq $null) {
+          $reply.ok = $false
+          $reply.channel = ''
+          $reply.error = 'no-client'
+          $reply.detail = '网易云客户端没在运行'
+        } else {
+          $r = Invoke-PlayDaily $t $req
+          $reply.ok = $r.ok
+          $reply.channel = $r.channel
+          if (-not $r.ok) { $reply.error = $r.error }
+          if ($r.detail) { $reply.detail = [string]$r.detail }
+          if ($r.first) { $reply.first = [string]$r.first }
+          if ($r.total) { $reply.total = [int]$r.total }
+          if ($r.queued) { $reply.queued = [int]$r.queued }
+          if ($r.resumed) { $reply.resumed = $true }
+          if ($r.restarted) { $reply.restarted = $true }
+          if ($r.restored) { $reply.restored = $true }
+          if ($r.detached) { $reply.detached = $true }
+          if ($r.quietMs) { $reply.quietMs = [int]$r.quietMs }
+          if ($r.ok) {
+            $now2 = $null
+            if ($manager -ne $null) {
+              try { $now2 = Read-Session (Get-TargetSession $manager) } catch { }
+            }
+            if ($now2 -eq $null) { $now2 = Read-Native }
+            $reply.now = $now2
+          }
         }
       }
 

@@ -494,7 +494,14 @@ test('Watcher：只有 started 没有详情时先占位 songId', () => {
   try {
     const d = w.getDebug()
     assert.equal(d.songId, '777')
-    assert.equal(w.getState().available, false, '没有歌名时不算可用')
+    // 只有 started（有 songId 没歌名）也算「有曲目」：webcmd 起播只发这一条，
+    // 按 title 卡门槛会让刚切过去的歌被判定成没有曲目，面板于是退回旧窗口标题。
+    // 歌名空着交给上层（player.mjs 的 #mergeElog）用窗口标题兜底。
+    const s0 = w.getState()
+    assert.equal(s0.available, true, '有 songId 就算可用')
+    assert.equal(s0.track.songId, '777')
+    assert.equal(s0.track.title, '')
+    assert.equal(s0.durationMs, 123_000)
 
     appendLog(file, [trackLine({ id: '777', name: '补全', artist: 'Z', duration: 123_000 }, 0)])
     w.poll()

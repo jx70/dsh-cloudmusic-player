@@ -81,6 +81,16 @@ window.__ModuleLoader__.load({
         seekFailed: '跳转没送达客户端',
         seekWindowLeaked: '已跳转，但播放器窗口被拉了出来',
         seekWindowWarn: '拖进度会短暂唤起播放器窗口',
+        daily: '今日推荐',
+        dailyBusy: '正在切换…',
+        dailyOk: '已切到每日推荐',
+        dailyNeedsLogin: '请先在网易云客户端登录',
+        dailyNoClient: '没找到播放器，先打开网易云',
+        dailyNetwork: '拉日推出了问题，稍后再试',
+        dailyEmpty: '今天的日推还是空的',
+        dailyUnavailable: '这台机器还没接日推',
+        dailyFailed: '客户端没接住日推指令',
+        dailyWindowWarn: '切日推会短暂唤起播放器窗口',
         settings: '设置',
       },
       en: {
@@ -117,6 +127,16 @@ window.__ModuleLoader__.load({
         seekFailed: 'Seek did not reach the client',
         seekWindowLeaked: 'Sought, but the player window was pulled up',
         seekWindowWarn: 'Dragging briefly pulls the player window up',
+        daily: 'Daily picks',
+        dailyBusy: 'Switching…',
+        dailyOk: 'Switched to daily picks',
+        dailyNeedsLogin: 'Sign in to the NetEase client first',
+        dailyNoClient: 'No player found — open NetEase first',
+        dailyNetwork: 'Could not fetch daily picks, try again later',
+        dailyEmpty: 'Today\u2019s picks are empty',
+        dailyUnavailable: 'Daily picks are not wired up on this machine',
+        dailyFailed: 'The client did not take the daily command',
+        dailyWindowWarn: 'Switching to daily picks briefly pulls the player window up',
         settings: 'Settings',
       },
     }
@@ -520,6 +540,15 @@ window.__ModuleLoader__.load({
 
       const act = (name, extra) => run(name, () => post('/action', { action: name, ...(extra || {}) }))
 
+      /**
+       * 一键日推。
+       *
+       * 后端拿到的是「插件取列表 → 两条 orpheus 消息投给客户端」，所以这里只负责
+       * 把失败码翻成人话。`busy` 由 run() 管，同一时刻只会有一发在途 ——
+       * 连点的第二次会被 disabled 挡住，服务端还有 inflight 合并兜底。
+       */
+      const playDaily = () => run('play_daily', () => post('/action', { action: 'play_daily' }))
+
       const pushVolume = (level) => {
         volLast.current = level
         if (volTimer.current) return
@@ -674,6 +703,27 @@ window.__ModuleLoader__.load({
       const activeVol = scopeNow === 'system' && sysVol ? sysVol : vol
       const activeMuted = !!(activeVol && activeVol.muted)
       const shownLevel = dragLevel !== null ? dragLevel : activeVol ? Number(activeVol.level) || 0 : 0
+
+      /**
+       * 日推失败码 → 人话。
+       *
+       * run() 会把 res.error 原样塞进 err（比如 'daily-needs-login'），
+       * 直接显示给用户就是一串英文标识符。这里把它翻成一句能照做的提示，
+       * 顺便让底部的 nc-err 也显示同一句。
+       */
+      const DAILY_TEXT = {
+        'daily-needs-login': 'dailyNeedsLogin',
+        'daily-no-cookie': 'dailyNeedsLogin',
+        'daily-no-client': 'dailyNoClient',
+        'daily-network': 'dailyNetwork',
+        'daily-empty': 'dailyEmpty',
+        'daily-unavailable': 'dailyUnavailable',
+        'daily-failed': 'dailyFailed',
+      }
+      const dailyKey = err && DAILY_TEXT[err] ? DAILY_TEXT[err] : ''
+      const dailyErrText = dailyKey ? t(dailyKey) : ''
+      // 非日推的错误照旧原样显示；日推的走上面那句翻译
+      const errText = dailyErrText || err
 
       // 收起态：只留一个胶囊
       if (ui.collapsed) {
@@ -883,6 +933,20 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
+        // 一键日推（只在大窗口出现；收起态那段 return 在更上面，天然没有它）
+        h('div', { className: 'nc-daily' },
+          h('button', {
+            className: 'nc-daily-btn',
+            title: t('daily'),
+            disabled: busy !== '' || unsupported,
+            onClick: playDaily,
+          },
+            busy === 'play_daily' ? h(RefreshIcon) : h(NoteIcon, { size: 11 }),
+            h('span', null, busy === 'play_daily' ? t('dailyBusy') : t('daily')),
+          ),
+          dailyErrText ? h('span', { className: 'nc-daily-hint' }, dailyErrText) : null,
+        ),
+
         // 音量行
         h('div', { className: 'nc-vol' },
           h('button', {
@@ -918,7 +982,7 @@ window.__ModuleLoader__.load({
 
         // 底部状态（只在出问题时出现，平时不占高度）
         err || degraded
-          ? h('div', { className: 'nc-err' }, err || t('helperDown'))
+          ? h('div', { className: 'nc-err' }, errText || t('helperDown'))
           : null,
         unsupported ? h('div', { className: 'nc-err' }, t('unsupported')) : null,
       )
@@ -1135,6 +1199,30 @@ body[data-ds-dark-theme] .nc-root{
 .nc-main-btn:active:not(:disabled){transform:scale(.92);}
 .nc-main-btn svg{color:inherit;}
 .nc-retry{color:var(--dsw-alias-state-warn-label,#d97706);}
+
+/* ── 一键日推 ── */
+/* 小胶囊：一行放得下，不抢控制行 28px 主键的地盘 */
+.nc-daily{display:flex;align-items:center;justify-content:center;gap:4px;margin:3px 0 0;}
+.nc-daily-btn{
+  display:flex;align-items:center;gap:3px;
+  height:17px;padding:0 7px;border-radius:6px;cursor:pointer;
+  font:500 9.5px/1 system-ui,-apple-system,"Segoe UI",sans-serif;
+  letter-spacing:.2px;
+  color:var(--nc-accent);
+  border:1px solid color-mix(in oklab, var(--nc-accent) 32%, transparent);
+  background:color-mix(in oklab, var(--nc-accent) 7%, transparent);
+  transition:background .15s ease,border-color .15s ease;
+}
+.nc-daily-btn:hover:not(:disabled){
+  background:color-mix(in oklab, var(--nc-accent) 15%, transparent);
+  border-color:color-mix(in oklab, var(--nc-accent) 52%, transparent);
+}
+.nc-daily-btn:disabled{opacity:.5;cursor:default;}
+.nc-daily-btn svg{width:10px;height:10px;flex:none;}
+.nc-daily-hint{
+  font-size:9px;line-height:1.2;
+  color:var(--dsw-alias-state-error-primary,#d33);opacity:.9;
+}
 
 /* ── 音量 ── */
 .nc-vol{display:flex;align-items:center;gap:5px;margin-top:2px;padding:0 2px;}

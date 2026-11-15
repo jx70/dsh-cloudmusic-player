@@ -23,6 +23,7 @@
 import z from '@deepseek-ai/schemastery'
 import { selectBackend } from './lib/backend.mjs'
 import { homeDirOf } from './lib/cache.mjs'
+import { DailyService } from './lib/daily.mjs'
 import { LyricsService } from './lib/lyrics.mjs'
 import { PlayerService, PLAYER_DEFAULTS } from './lib/player.mjs'
 import { mountTransport } from './lib/transport.mjs'
@@ -119,6 +120,25 @@ export const Config = z.object({
     .description('日志增量读取间隔（毫秒）')
     .volatile(),
 
+  // ── 每日推荐 ────────────────────────────────────────────────────────────
+  // 客户端 3.1.43 的 webcmd 命令表里没有「播放日推」，所以列表必须由插件自己拿：
+  // 借客户端已登录的 cookie 调接口，拿到 songId 之后再用 orpheus:// 逐条喂。
+  dailyApiBase: z
+    .string()
+    .default('https://music.163.com/api')
+    .description('每日推荐接口前缀，方便换成镜像/反代'),
+  dailyLimit: z
+    .number()
+    .step(1)
+    .min(1)
+    .max(200)
+    .default(50)
+    .description('每日推荐取多少首（接口一般给 30~50）'),
+  dailyProfileDir: z
+    .string()
+    .default('')
+    .description('客户端 CEF profile 目录。留空 = 自动找 %LOCALAPPDATA%\\NetEase\\CloudMusic\\webapp* 里 Cookies 最新的那个'),
+
   // ── 助手进程 ────────────────────────────────────────────────────────────
   powershellPath: z
     .string()
@@ -163,6 +183,9 @@ export const DEFAULTS = {
   elogEnabled: true,
   elogPath: '',
   elogPollMs: 400,
+  dailyApiBase: 'https://music.163.com/api',
+  dailyLimit: 50,
+  dailyProfileDir: '',
   requestTimeoutMs: PLAYER_DEFAULTS.requestTimeoutMs,
   restartLimit: PLAYER_DEFAULTS.restartLimit,
 }
@@ -243,8 +266,9 @@ export function apply(ctx, config) {
   })
 
   const backend = selectBackend()
-  const player = new PlayerService({ backend, getConfig, log })
   const cacheDir = homeDirOf(ctx)
+  const daily = new DailyService({ getConfig, log })
+  const player = new PlayerService({ backend, getConfig, log, daily })
   const lyrics = new LyricsService({ getConfig }, cacheDir)
 
   /** 路由最终走的是哪条车道（fetch / webserver / none），/health 会报出去 */
@@ -360,6 +384,9 @@ export function apply(ctx, config) {
           seekWindowLeak: player.windowLeak !== false,
           helper,
           lyrics: { enabled: lyrics.enabled(), base: lyrics.base() },
+          // 日推依赖客户端登录态（cookie 从客户端 CEF profile 解出来），
+          // 非 Windows 直接没有这条路
+          daily: { available: backend.platform === 'win32' },
         })
       }),
     },
@@ -430,14 +457,17 @@ export function apply(ctx, config) {
       description:
         '控制本机网易云音乐客户端：播放/暂停/切歌、跳进度、调音量（默认只调网易云自己的音量，不动系统总音量）、'
         + '看当前在放什么。还可以取当前这首歌的歌词（带时间轴，LRC 解析后的行数组）。'
+        + 'play_daily 会把它切到「每日推荐」并从第一首开始播（借客户端已登录的 cookie 取日推列表）。'
         + '客户端没开时会返回 ok:false 与提示，不抛错。',
       parameters: {
         type: 'object',
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health'],
-            description: '要做什么。status 看当前状态；volume 需要 level；mute 需要 muted；seek 需要 positionMs',
+            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health', 'play_daily'],
+            description:
+              '要做什么。status 看当前状态；volume 需要 level；mute 需要 muted；seek 需要 positionMs；'
+              + 'play_daily 播放每日推荐（替换队列，从第一首开始）',
           },
           positionMs: { type: 'integer', description: 'seek 的目标位置（毫秒）' },
           level: { type: 'number', description: 'volume 的目标音量，0..1' },
@@ -554,6 +584,17 @@ export function apply(ctx, config) {
               text: v
                 ? `音量已设为 ${Math.round(v.level * 100)}%（${v.scope === 'process' ? '网易云' : '系统'}）${v.muted ? '，静音中' : ''}`
                 : '音量已设置。',
+            }
+          }
+          if (action === 'play_daily') {
+            const res = await player.action('play_daily')
+            if (!res.ok) return { text: `播放日推失败：${res.message || res.error || 'unknown'}${res.detail ? ` (${res.detail})` : ''}` }
+            const first = res.firstSong
+            return {
+              text: [
+                `已切到每日推荐（${res.songCount} 首）${first ? `，正在播 ${first.name}${first.artist ? ` - ${first.artist}` : ''}` : ''}。`,
+                describe({ ok: true, now: res.now, volume: res.volume }),
+              ].filter(Boolean).join('\n'),
             }
           }
           const res = await player.action(action, { positionMs: num(args?.positionMs, 0) })

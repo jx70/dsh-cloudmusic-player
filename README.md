@@ -21,26 +21,27 @@
 
 ## 它是什么
 
-一块浮在 DSH 界面右下角的小卡片。点开是一个迷你播放器，控制的是**你本来就开着的那个网易云客户端**——不是另起一个播放器，不下载、不登录、不建歌单。
+一块浮在 DSH 界面右下角的小卡片。点开是一个迷你播放器，控制的是**你本来就开着的那个网易云客户端**——不是另起一个播放器，不下载、不建歌单、没有自己的账号。
 
 | 能做什么 | 说明 |
 |---|---|
+| **一键日推** | 展开态点「今日推荐」，客户端队列直接换成今天的每日推荐、从第一首开始播。借的是客户端自己的登录态，插件不新建会话 |
 | **换歌 / 播放暂停** | 上一首、下一首、播放暂停 |
 | **音量** | `APP` 只改网易云自己的音量（不动别的程序，也不动系统总音量）；`SYS` 改系统总音量。两路各自独立读数 |
 | **滚动歌词** | 当前行居中高亮、上下淡出；进度连续插值，不是两秒跳一格 |
 | **拖进度** | 展开态拖进度条或按 ← / →（±5 s，Shift ±10 s）真的跳转，Home / End 到头尾 |
 | **外语歌译文** | 原文下面多一行小字中文，来自网易云自己的翻译 |
 | **拖动 / 收起** | 拖到任意位置，位置记在 localStorage；可收成一个只有歌名的小胶囊 |
-| **给模型用** | 装好后模型多一个 `cloudmusic_player` 工具，可以替你暂停、切歌、调音量、跳进度、读歌词 |
+| **给模型用** | 装好后模型多一个 `cloudmusic_player` 工具，可以替你暂停、切歌、调音量、跳进度、读歌词、放日推 |
 | **深色 / 浅色** | 跟着 DSH 主题走，对比度按 WCAG AA 调过 |
 
-**它做不到**：不能搜索歌曲、不能改播放列表。
+**它做不到**：不能搜索歌曲、不能改播放列表（日推是唯一会「换队列」的动作，换的是网易云自己那份日推）。
 
 ### 进度从哪来
 
 网易云 3.x 在 Windows 10 上**不注册**系统媒体会话（`cloudmusic.dll` 里能直接看到 `[SMTCWrapper] Failed to set play status ret=`），但会把自己的播放事件写进 `%LOCALAPPDATA%\NetEase\CloudMusic\cloudmusic.elog`。插件解码这个日志并回放状态机，拿到曲目、`songId`、时长、**精确到毫秒的播放位置**、暂停/继续、seek。
 
-冷启动解码 8.9 MB / 3 万行只要 **14 ms**，之后每 400 ms 只读新增的尾巴。**不读也不落盘**日志里的 `musicurl`（带签名的播放地址），不需要登录、不碰 cookie。
+冷启动解码 8.9 MB / 3 万行只要 **14 ms**，之后每 400 ms 只读新增的尾巴。**不读也不落盘**日志里的 `musicurl`（带签名的播放地址）。只读日志这条路不需要登录、不碰 cookie —— 只有「今日推荐」会去读（见下）。
 
 客户端如果真的注册了 SMTC，就优先走 SMTC。两条都不通就如实说「没在放歌」——**绝不接管别的程序的会话**（早期版本在这里踩过坑：按暂停暂停的是浏览器里的视频）。
 
@@ -51,6 +52,17 @@
 代价是**客户端收到任何 orpheus 消息都会 `showWindow`**（前端 `activeWindow` effect 末尾无条件执行，`actionId` 白名单管不到）。所以 `helper.ps1` 里有一整套窗口压制：投递前先把窗口遮起来（最小化/托盘态用空 region + `alpha=0` 的 layered 窗口，可见态用 z 序插回原位），投递后起一个后台守卫盯着，把客户端那几拨迟到的 show 按回去、把焦点还给原来的窗口。实测一次 seek 会引来 2～3 拨 show，最晚一拨落在 7.3 秒，所以守卫要盯满 8 秒以上。
 
 守卫还有个必须的收尾动作：客户端某一拨 show 会把窗口摆在最小化的占位几何（`-25600, 159×27`）却仍然报 `ico=False`，并且顺手把 `rcNormalPosition` 写成那个假几何——不补的话，用户下次还原出来是个 159×27 的小条，所有按钮都点不到。收尾会按到状态真的对了为止，再把 `rcNormalPosition` 写回原矩形。
+
+### 日推怎么来的
+
+「今日推荐」不能靠 orpheus 协议做——把客户端前端拆开看（`package/orpheus.ntpk` 是个 zip，里面 229 个 chunk），`onWebMessage` 的命令表里有 `seek` / `play`（`song` / `album` / `playlist` / `audio`）、`playingList`、`pause`、`resume`、`next` / `previous`、`volume`、`mode`，**唯独没有「播放每日推荐」这种资源类型**；`playAll` 支持 `resourceType: dailyRecommend`，但那条只在原生推送（`systemUIHint` 的 `daysong_notify`）里被触发，外部伪造不了。实测投 `{cmd:"daysong_notify",action:"btn_2"}` 与 `orpheus://nm/play/dailySong` 都没有反应。
+
+所以分两步，都是「插件自己动手、客户端只管播」：
+
+1. **拿列表**：日推接口 `GET https://music.163.com/api/v1/discovery/recommend/songs?limit=50` 要登录态。插件没有登录流程，就直接借客户端自己的——`%LOCALAPPDATA%\NetEase\CloudMusic\webapp*\Cookies` 里 `MUSIC_U` 等 cookie 是 `v10` 前缀的 OSCrypt 密文，密钥在 `LocalPrefs.json` 的 `os_crypt.encrypted_key`（base64，去 5 字节 `DPAPI` 头，`CryptUnprotectData` 得 32 字节 AES key），AES-256-GCM 解得明文，拼成 `cookie` 头。**只读客户端已经存在的凭证，插件本身不登录、不存凭证。**
+2. **起播**：投 `{"cmd":"play","type":"song","id":<第一首>}` 换掉队列并播放，等 420 ms 再投 `{"cmd":"playingList","type":"addToNext","value":[其余 id]}` 把剩下的塞进队列。窗口压制与 seek 完全同一套。
+
+未登录时这个接口**不报 401**，而是回 `200 + {"code":200,"recommend":[]}`（已实测），所以「需要登录」只能靠空数组判定，提示是「请先在网易云客户端登录」。
 
 ---
 
@@ -179,10 +191,14 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 | 进度条不出现 | `elog.available: false` → 看 `elog.reason`（`missing` / `no-track-yet` / `client-exited`） |
 | 拖了进度没反应 | 看 `/action` 的返回：`ok: false` 说明 `orpheus` 协议没注册（`reg query HKLM\SOFTWARE\Classes\orpheus`）；`channel: smtc` 说明走的不是这条路 |
 | 跳进度时客户端闪一下 | 正常：客户端收到协议消息必弹窗，helper 会把它按回去。托盘态一帧不露，最小化态只在屏外动，可见态位置不动 |
-| 跳完进度顶部一条白边 | 客户端那 4 个 `OrpheusShadow` 边框窗被排到了主窗口上面。清一次它们的 region 即可（helper 在投递前会自动做），若反复出现说明 helper 是旧版本 |
+| 跳完进度顶部一条白边 | 客户端那 4 个 `OrpheusShadow` 边框窗（永远画纯白的自绘弹窗）被排到了主窗口上面，会留下一条 80px 的纯白带且不会自己消失。helper 每次投递前都会清空它们的 region（0.4.0 起不再挑窗口状态），若反复出现说明 helper 是旧版本 |
 | 显示「后台没响应」 | 点重试；还不行看 `stderr` 字段，或 `transport` 是不是 `none` |
 | 音量拖了没反应 | `pids` 空（没匹配到进程）；或 SYS 作用域下系统端点被独占 |
 | 外语歌没有小字译文 | `lyricsTranslation` 是不是关了；中文歌本来没有；也可能这首就没翻译 |
+| 点「今日推荐」提示要先登录 | 客户端没登录，或 cookie 已被刷新。在客户端里登录一次即可 |
+| 点「今日推荐」提示没找到客户端 | 网易云没开。先打开客户端再点 |
+| 点「今日推荐」提示拉取失败 | 网络或接口变动。看 `/health` 的 `daily.available`（非 Windows 恒为 false） |
+| 日推起播后歌名短暂不对 | 客户端这条路径只发 `started`（没有歌名），稍后由后续事件或窗口标题补上 |
 | 桌面版里报错 | `node scripts/enable-desktop.mjs --check`，跑完记得重启 dsh-desktop |
 
 完整排错表（含 403、`webserver: duplicate exact route`、`!!js` 求值等）在 [`docs/DESIGN.md`](docs/DESIGN.md#排错完整)。
@@ -191,13 +207,14 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 
 ## 已知限制
 
-1. **不登录、不搜索、不建歌单**——只控制「已经在放的那首」。
+1. **不搜索、不建歌单、没有自己的账号**——控制「已经在放的那首」；「今日推荐」会换掉队列，换的是网易云自己那份日推。登录态只从客户端已有的 cookie 里读，插件不新建会话。
 2. **跳进度会起一个短命的 `cloudmusic.exe`**。协议命令要走客户端自己的 `--webcmd` 入口，第二个进程把消息转交主进程后约 1 秒内自行退出（日志里是 `Another client is exist.`）。松手才发一次，不是连续发。
 3. **跳进度时会短暂压制客户端窗口**。客户端收到消息必弹窗（协议行为），所以投递前后要遮窗口、盯 z 序、还焦点。托盘态一帧不露，最小化态只在屏外动，可见态位置不动。
 4. **进度依赖客户端日志**。日志读不到（旧版客户端 / 被关 / 路径不同）时降级为「本地计时 + 点歌词校准」——那时起点是猜的（滞后量 = 打开前已播的时长）。
 5. **播放暂停是切换键**。为防「按暂停反而开始播」，发键前先看 2.6 秒内的意图缓存，没有才采 ~150 ms 峰值判定。极静的段落仍可能误判。
 6. **只有 Windows 有真实后端**，且必须 PowerShell 5.1。
 7. 歌词与译文都来自网易云的 web 接口（非公开），可能限流或改字段；译文翻错、翻得少是数据源的事，插件不补译。
+8. **「今日推荐」依赖客户端已登录**。未登录时接口回 200 + 空数组（不报 401），插件据此提示「请先在网易云客户端登录」；cookie 随客户端刷新，失效后重新登录客户端即可。日推起播的那一刻客户端只发 `started` 事件（没有歌名），歌名会稍晚补上。
 
 完整的 18 条（含版权曲目匹配、日志编码版本依赖、旧世代宿主鉴权水位等）在 [`docs/DESIGN.md`](docs/DESIGN.md#已知限制完整)。
 
@@ -206,13 +223,13 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 ## 开发
 
 ```bash
-npm test                      # 77 条：日志解码 31 + 歌词 25 + 传输层 21
+npm test                      # 105 条：日志解码 31 + 歌词 25 + 传输层 21 + 日推 28
 node --test test/elog.test.mjs   # 单个文件（目录形式会 Cannot find module）
 npm run enable-desktop        # = node scripts/enable-desktop.mjs
 npm run sync                  # 推 GitHub
 ```
 
-测试不碰系统、不需要开着网易云：解码器与状态机用合成日志，歌词用打桩的 `fetch`，传输层用假的 `connection` / `webServer`。
+测试不碰系统、不需要开着网易云：解码器与状态机用合成日志，歌词用打桩的 `fetch`，传输层用假的 `connection` / `webServer`，日推用打桩的 cookie 解密与 HTTP。
 
 ```
 index.js             Host 半端：Config / 6 条路由 / 模型工具
@@ -221,6 +238,8 @@ lib/player.mjs       助手进程生命周期 + 三车道合并
 lib/helper.ps1       常驻 PowerShell（WinRT / Core Audio / 窗口标题 / 热键）
 lib/elog.mjs         cloudmusic.elog 解码 + 状态机回放
 lib/lyrics.mjs       搜索匹配 / LRC 解析 / 译文叠加
+lib/daily.mjs        每日推荐：取列表 / 按天缓存 / 错误分类
+lib/cookies.mjs      读客户端 CEF cookie（OSCrypt v10 + DPAPI）
 lib/cache.mjs        歌词磁盘缓存（30 天）
 lib/transport.mjs    三条传输车道 + Fetch↔Node 适配
 lib/backend.mjs      平台后端注册表

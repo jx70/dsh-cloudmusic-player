@@ -3,6 +3,31 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-15
+
+**一键播放日推**。展开态多了一个「今日推荐」小按钮：点一下就把客户端队列换成今天的每日推荐、从第一首开始播。数据不是猜的，是插件用客户端自己的登录态去拉的。
+
+### Added
+
+- **`play_daily` 动作**（`lib/player.mjs` / `index.js` / `client.js`）。展开态 `.nc-ctrl` 与 `.nc-vol` 之间多一行 `.nc-daily`，里面是一个 17 px 高的小胶囊按钮（`♪ 今日推荐`）；收起态走的是另一个 return 分支，所以天然不出现。返回值沿用其它动作的形状（`ok` / `message` / `now` / `volume`），另外带 `songCount` / `firstSong` / `day` / `cached`。
+- **`lib/cookies.mjs`：读客户端的 CEF cookie**。日推接口要登录态，而插件自己没有登录流程——所以直接借客户端已有的：`%LOCALAPPDATA%\NetEase\CloudMusic\webapp*\Cookies`（SQLite）里 `MUSIC_U` 等 21 个 cookie 全是 `v10` 前缀的 OSCrypt 密文，密钥在 `LocalPrefs.json` 的 `os_crypt.encrypted_key`（base64 → 去 5 字节 `DPAPI` 头 → `CryptUnprotectData` 得 32 字节 AES key），再用 AES-256-GCM 解（`v10` + 12 B nonce + 密文 + 16 B tag）。两个坑：① 客户端运行时 `Cookies` 被独占锁，必须先 `fs.copyFileSync` 到临时目录再打开；② PowerShell 5.1 没有 `[Convert]::FromHexString`，二进制只能走 base64 传递（`-EncodedCommand` + `[Convert]::FromBase64String`）。
+- **`lib/daily.mjs`：拉日推列表**。`GET /api/v1/discovery/recommend/songs?limit=50`，带上面拼好的 cookie 串与客户端 UA。`normalizeSongs()` 同时兼容 `recommend[]` / `data.dailySongs[]` / `data.recommend[]` / `songs[]` 四种形状，丢掉 id 为空 / `'0'` / `'NaN'` 的项。按天缓存（同一天重复点不重复请求），并发请求合并成一个 inflight。
+- **`playDaily` 助手命令**（`lib/helper.ps1` 的 `Invoke-PlayDaily`）。先投 `{"cmd":"play","type":"song","id":<第一首>}`，等 420 ms 让客户端把队列换完，再投 `{"cmd":"playingList","type":"addToNext","value":[其余 id]}` 把剩下的塞进队列。窗口压制直接复用 `SendOrpheusCommand` 那一套（Blind / Ghost / MuteShadows / Guard）。
+- **`test/daily.test.mjs`：28 条**。`normalizeSongs` 四种形状、按天缓存 / 跨天失效 / `force`、并发合并、`limit` 夹取、`apiBase` 尾斜杠、空列表判为未登录、cookie 解不开、401 / 403 / 500 / 网络异常、失败不落缓存，以及 `play_daily` 的 unavailable / 成功 / 空列表 / 透传 / 抛错 / `no-client` / 连点去重。`npm test` 现为 **105 条**（elog 31 + lyrics 25 + transport 21 + daily 28）。
+
+### Fixed
+
+- **`started` 事件会把歌名张冠李戴**（`lib/elog.mjs`）。webcmd 起播这条路客户端只发 `started`（`native播放资源load完成，开始播放`）和 `native播放state`，**不发** `playOneTrackInPlayingList` / `nativePlay` 那两条带完整曲目 JSON 的事件；而旧代码在 `started` 里写的是 `this.track = this.track || {...}` 再改 `songId`，于是「`songId` 是新的、歌名还是上一首」。现在整体替换成只带 `songId` 的空壳，让前端老实地退回窗口标题兜底。
+- **连点两次不重复起播**。`#playDaily()` 用一个 `dailyInflight` 挂住进行中的 promise，第二次点击直接 `await` 第一份结果并标 `deduped: true`，不会投第二遍 webcmd。
+- **客户端窗口顶部那条白边**（`lib/helper.ps1` 的 `SendOrpheusCommand`）。白边的真身是客户端那 4 个 `OrpheusShadow` 边框窗（永远画纯白的自绘弹窗），正常时被压在主窗下面只露出一圈柔化阴影。原来的压制条件是「窗口从最小化 / 托盘恢复时才弄哑」，前提是「窗口正常摆在屏幕上时客户端不会走 restore」。**实测否掉了这条前提**：客户端开着、首页完整摊在屏幕上，发一条 webcmd 它照样会自己走一遍 restore，4 个边框窗被重排到主窗内侧上方，屏幕顶部留下一条 80 px 的纯白带（截图采样 x=1500：y=69..148 全是 `255,255,255`），而且不会自己消失。现在改成**只要发 orpheus 消息就先 `MuteShadows`**，与窗口当前是什么状态无关。代价仍是窗口外沿那圈 32 px 柔化阴影没了（`MuteShadows` 不恢复），比顶部一条 80 px 白带划算。
+
+### Known limitations
+
+- **未登录时接口不报 401，而是回 200 + `{"code":200,"recommend":[]}`**（已实测）。所以「需要登录」只能靠空数组判定，`daily-needs-login` 的 `detail` 会区分 `no cookie` 与 `empty recommend list`。
+- **cookie 会随客户端刷新而失效**。失效时表现是空列表（同上），点按钮会提示「请先在网易云客户端登录」，重新登录客户端即可。
+- **日推起播瞬间歌名可能短暂显示窗口标题**。`started` 事件里没有歌名，要等客户端的后续事件或窗口标题更新（见上）。
+- 一次 `play_daily` 要发两条 webcmd，窗口压制跟 `seek` 同一套：托盘 / 最小化态一帧不露，窗口**正摆在屏幕上且部分可见**时仍会跳前约 1.3 秒（与 seek 同一个残留）。
+
 ## [0.3.0] - 2026-11-14
 
 **拖进度条跳转**。`native` 车道原来 `canSeek` 恒为 false，进度条只能看；现在能拖、能按方向键、真的跳。

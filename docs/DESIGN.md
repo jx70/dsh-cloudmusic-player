@@ -35,6 +35,7 @@ README 只讲「怎么装、怎么用」。这份文档讲**为什么这么写**
 │    │    └─ ElogWatcher ── 读 ──► cloudmusic.elog
 │    │                               └─ 解码 + 回放 → 曲目/songId/时长/位置/暂停（车道 2）
 │    ├─ LyricsService ── fetch ──► music.163.com
+│    ├─ DailyService  ── fetch ──► music.163.com（借 cookies.mjs 读到的客户端 cookie）
 │    └─ 6 条 /api/cloudmusic-player/* 路由
 └───────────────────────────────────────────────┘
                     ▲ 同源 fetch（带 cookie，过 connection 信任栅栏）
@@ -56,6 +57,8 @@ README 只讲「怎么装、怎么用」。这份文档讲**为什么这么写**
 | `lib/helper.ps1` | 常驻 PowerShell：WinRT、Core Audio、窗口标题、热键，JSONL 协议 |
 | `lib/elog.mjs` | `cloudmusic.elog` 解码 + 状态机回放 |
 | `lib/lyrics.mjs` | 搜索匹配、LRC 解析、译文叠加 |
+| `lib/daily.mjs` | 每日推荐：取列表、按天缓存、并发合并、错误分类 |
+| `lib/cookies.mjs` | 读客户端 CEF cookie（OSCrypt `v10` + DPAPI + AES-256-GCM），只读不存 |
 | `lib/cache.mjs` | 歌词磁盘缓存（30 天 / 400 个文件上限） |
 | `lib/transport.mjs` | 三条传输车道的选择与 Fetch↔Node 适配 |
 | `lib/backend.mjs` | 平台后端注册表（Windows 一个对象，非 Windows 一个降级对象） |
@@ -141,6 +144,14 @@ CEF 会照着这份 geometry 重新 layout；等我们把它拉回 1175×940，�
 z 序压底当场有效但客户端下一次 restore 会重新排回来；`RGN_DIFF` 只能降到 13 行。
 唯一持久的是把它们的 visible region 清空（`SetWindowRgn` 到空 region）——代价是窗口外沿那圈
 阴影没了，用户拖进度时察觉不到。所以 `MuteShadows()` 在投递前调用，而且**不恢复**。
+
+**0.4.0 起：不再挑窗口状态。** 原来只在 `iconic || wasHidden` 时弄哑，理由是「窗口正常摆在屏幕上时
+客户端不会走 restore」。实测否掉了这条前提：客户端开着、首页完整摊在屏幕上，发一条 webcmd 它照样
+自己走一遍 restore，4 个边框窗被重排到主窗内侧上方，屏幕顶部留下一条 **80 px** 的纯白带
+（截图逐像素采样 `x=1500`：`y=69..148` 全是 `255,255,255`，白带下沿紧贴客户端标题栏），
+而且不会自行消失，要等用户手动挪窗口。现在改成**只要发 orpheus 消息就先 `MuteShadows`**，
+与窗口当前状态无关；验证方式是发完 dump 一轮窗口，8 个 `OrpheusShadow` 的 `rgn kind` 全为 `1`
+（`NULLREGION`），截图上再扫不到连续白带（同一条采样列只剩 6 个零散白像素，来自桌面图标）。
 
 **守卫要盯满 8 秒。** 实测一次 seek 引来 2～3 拨 show，最晚一拨落在 7.3 秒
 （`orpheus_runner` 起新进程转发耗的），所以收敛条件是 `elapsed >= LATE_MS(8200) && quiet >= 1500`，
@@ -234,7 +245,75 @@ for (let b = 0; b < 256; b++) {
 日志长到几百 MB 也不会让它变慢。（朴素写法是整文件全量读，长期跑会越来越慢，所以这里绕开了。）
 
 只读事件行，**不读也不落盘**日志里的 `musicurl`（那是带签名的播放地址），
-不需要登录、不碰 cookie。
+这条日志链路不需要登录、不碰 cookie。
+
+（唯一的例外是「今日推荐」：它要登录态才能拉到列表，做法是只读客户端自己已经存在的
+CEF cookie，见 [每日推荐](#每日推荐)。插件不新建登录会话、不保存凭证。）
+
+---
+
+## 每日推荐
+
+### 为什么不能用 orpheus 协议
+
+`package/orpheus.ntpk`（38 MB）其实是「32 字节 ASCII 版本串 + 14 字节尾巴 + 从 offset 100
+开始的完整 ZIP」，切出来就是前端代码：`pub/hybrid/*.chunk.5d77cd4.js` 共 229 个。
+webcmd 的唯一下发点是 `73.chunk` 的 `onWebMessage`，它的 `switch` 里能枚举到：
+
+`devtool` / `UserMessageOpen` / `pause` / `resume` / `next` / `previous` / `volume` /
+`mode` / `seek` / `playingList`（`addToNext`、`clear`）/ `play` 与 `download`
+（`song`、`program`、`album`、`playlist`、`audio`）/ `listentogether` / `connectChannel`。
+
+**没有 `dailyRecommend` 这种资源类型**。客户端内部确实支持
+`{actionId: playAll, data:{resource:{}, resourceType: dailyRecommend, from:{...}}}`
+（`39.chunk` 的日推页按钮、`73.chunk` 的 `daysong_notify` 推送 `btn_2`），但那条路径
+只由原生推送 `systemUIHint` 触发 —— 外部拿不到。实测过三条死路：
+
+| 试过 | 结果 |
+|---|---|
+| `{cmd:"daysong_notify", action:"btn_2"}` | 无反应。该 case 在 `systemUIHint` 订阅里（`73.chunk@112262`），不在 `onWebMessage` 里 |
+| `orpheus://nm/play/dailySong` | 无反应。前端所有 chunk 里搜不到这个深链的解析器，native 侧也不处理 |
+| `homePage` 缓存里的 `orpheus://songrcmd?...` | 那是**风格日推**，不是用户的每日推荐 |
+
+### 实际走的这条路
+
+1. **取列表**：`GET https://music.163.com/api/v1/discovery/recommend/songs?limit=50`，
+   带客户端的 cookie 与 UA。返回 `data.recommend[]`（41～42 首，带 `fee` 版权标记）。
+2. **起播**：投 `{"cmd":"play","type":"song","id":<第一首>}` 换掉队列并播放；
+   等 420 ms 让客户端把队列换完，再投
+   `{"cmd":"playingList","type":"addToNext","value":[其余 id]}` 把剩下的追加进去。
+
+### cookie 从哪来（`lib/cookies.mjs`）
+
+客户端是 CEF，登录态在
+`%LOCALAPPDATA%\NetEase\CloudMusic\webapp91x64\Cookies`（SQLite）里，`MUSIC_U` 等 21 个
+cookie 的 `encrypted_value` 全是 `v10` 前缀的 OSCrypt 密文，明文列长度为 0。解密链：
+
+1. 密钥在 `LocalPrefs.json` 的 `os_crypt.encrypted_key`（注意：这是 Chrome 的 `Local State`
+   内容被塞进了 `LocalPrefs.json`，目录里没有 `Local State` 文件）。base64 解码后前 5 字节是
+   ASCII `DPAPI`，去掉这 5 字节，剩下的交给 `CryptUnprotectData`（当前用户作用域）→ 32 字节 AES key。
+2. `v10` 密文按 AES-256-GCM 解：`v10` 之后 12 字节 nonce、最后 16 字节 tag，中间是密文。
+
+两个坑：
+
+- **客户端运行时 `Cookies` 被独占锁**，直接读会 `The process cannot access the file ...`。
+  必须先 `fs.copyFileSync` 到临时目录再 `new DatabaseSync(tmp, {readOnly:true})`。
+- **PowerShell 5.1 没有 `[Convert]::FromHexString` / `ToHexString`**（.NET Framework 缺这两个 API），
+  二进制只能走 base64 传递：`-EncodedCommand`（脚本先 `Buffer.from(code,'utf16le').toString('base64')`）
+  + `[Convert]::FromBase64String`。
+
+### 未登录时接口不报 401
+
+实测：不带任何 cookie 请求日推接口，**HTTP 200，正文就 27 字节 `{"code":200,"recommend":[]}`**。
+所以「需要登录」只能靠 `recommend.length === 0` 判定，`daily-needs-login` 的 `detail` 会区分
+`no cookie`（根本没解密出 cookie）与 `empty recommend list`（有 cookie 但列表为空）。
+
+### 起播瞬间歌名是空的
+
+webcmd 起播这条路，客户端只发 `started`（`native播放资源load完成，开始播放`，带 `songId`）
+和 `native播放state`，**不发** `playOneTrackInPlayingList` / `nativePlay` 那两条带完整曲目
+JSON 的事件。所以 `lib/elog.mjs` 在 `started` 里只能确认 `songId`，必须把 `title`/`artist`
+清空（早期版本保留旧值，导致「songId 是新的、歌名还是上一首」），前端会退回窗口标题兜底。
 
 ---
 
@@ -433,7 +512,7 @@ int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid guidEventContex
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/cloudmusic-player/state` | 当前状态（歌名/歌手/进度/音量/会话） |
-| POST | `/api/cloudmusic-player/action` | `{ "action": "play\|pause\|toggle\|next\|prev\|seek", "positionMs": 0 }` |
+| POST | `/api/cloudmusic-player/action` | `{ "action": "play\|pause\|toggle\|next\|prev\|seek\|play_daily", "positionMs": 0 }` |
 | POST | `/api/cloudmusic-player/volume` | `{ "level": 0.5 }` 或 `{ "muted": true }`，可带 `"scope": "process\|system"` |
 | GET | `/api/cloudmusic-player/lyrics?songId=&title=&artist=&durationMs=` | LRC 解析后的 `lines: [{t, text, tr?}]`，顶层带 `translated`（有译文为 true）；给了 `songId` 就直取，跳过搜索 |
 | GET | `/api/cloudmusic-player/health[?deep=1]` | 自检；`deep=1` 列出全部 SMTC 会话与音频会话；带 `transport`（`fetch` / `webserver` / `none`）说明走哪条车道 |
@@ -442,7 +521,10 @@ int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid guidEventContex
 失败一律 `{ ok: false, error, detail }`，**不返回 500** —— 悬浮框要能稳定显示错误，而不是白屏。
 
 业务失败的 `error` 取值：`no-session`（没有可控制的会话）、`seek-unsupported`（车道既没有时间轴也没有
-orpheus 协议通道）、`bad-action`（未知动作）、`helper-unavailable`（助手起不来）、`lyrics-disabled`（歌词被关了）。
+orpheus 协议通道）、`bad-action`（未知动作）、`helper-unavailable`（助手起不来）、`lyrics-disabled`（歌词被关了）、
+`daily-needs-login`（日推接口回空、通常是客户端没登录）、`daily-no-cookie`（解不出客户端 cookie）、
+`daily-network`（拉日推失败）、`daily-no-client`（客户端没开）、`daily-empty`（今天的日推是空的）、
+`daily-unavailable`（非 Windows 平台没接日推）、`daily-failed`（客户端没接住指令）。
 
 ---
 
@@ -451,11 +533,12 @@ orpheus 协议通道）、`bad-action`（未知动作）、`helper-unavailable`�
 装好之后模型多一个 `cloudmusic_player`：
 
 ```
-action: status | play | pause | toggle | next | prev | seek | volume | mute | lyrics | health
+action: status | play | pause | toggle | next | prev | seek | volume | mute | lyrics | health | play_daily
 positionMs / level / muted / scope
 ```
 
-「放首歌」它做不了（那要登录态搜索 + 播放列表），它能做的是**接管你正在放的那首**。
+「放首歌」它做不了（那要登录态搜索 + 播放列表），它能做的是**接管你正在放的那首**；
+唯一例外是 `play_daily` —— 它把队列换成今天的每日推荐、从第一首开始播。
 
 `status` 的输出会写清「歌词来源」「进度来源」，`health` 会列出窗口通道、原生车道、热键、
 日志车道、HTTP 车道 —— 都是给模型看的诊断事实，不上界面。
@@ -535,6 +618,9 @@ Linux 上是 `playerctl` + `pactl`。
         elogEnabled: true                # 读客户端日志拿真进度（native 车道的核心）
         elogPath: ''                     # 留空 = 自动找 %LOCALAPPDATA%\NetEase\CloudMusic\cloudmusic.elog
         elogPollMs: 400                  # 日志增量轮询间隔
+        dailyApiBase: 'https://music.163.com/api'
+        dailyLimit: 50                   # 拉多少首，1–200
+        dailyProfileDir: ''              # 留空 = 自动找 %LOCALAPPDATA%\NetEase\CloudMusic\webapp*
 ```
 
 `hotkey*` 三项要和网易云「设置 → 快捷键 → 全局快捷键」里那三条**完全一致**。
@@ -602,7 +688,9 @@ Linux 上是 `playerctl` + `pactl`。
 
 ## 已知限制（完整）
 
-- **不登录、不搜索、不建歌单**。它只控制「已经在放的那首」。
+- **不搜索、不建歌单、没有自己的账号**。它控制「已经在放的那首」；「今日推荐」是唯一会换队列的
+  动作，换的是网易云自己那份日推。登录态只从客户端已经存在的 cookie 里读，插件不新建会话、
+  不保存凭证（见 [每日推荐](#每日推荐)）。
 - 只有 Windows 有真实后端。macOS / Linux 上悬浮框与歌词可用，播放控制与音量显示「本机不支持」。
 - 必须 PowerShell 5.1；PowerShell 7 无 WinRT 投影，`winrt: false`。
 - **native 车道跳进度会起一个短命的 `cloudmusic.exe`**。进度是从客户端日志读出来的，准到毫秒；
@@ -614,7 +702,7 @@ Linux 上是 `playerctl` + `pactl`。
   解法：点歌词里当前那句手动对齐（锚点按歌记住、30 分钟过期）。切歌后起点重置。
 - **日志解码依赖客户端版本**。`cloudmusic.elog` 是逐字节替换的弱加密，解码表是按实测字节反推出来的；
   客户端换一种编码就得重新对表。
-  插件只读事件行，**不读也不落盘** `musicurl`（带签名的播放地址），不需要登录、不碰 cookie。
+  插件只读事件行，**不读也不落盘** `musicurl`（带签名的播放地址），这条链路不需要登录、不碰 cookie。
 - **native 车道的播放/暂停是「切换键」**（`Ctrl+Alt+P` 一个键来回切），所以插件不盲目按键：
   先看「刚按过的意图」（2.6 秒内有效），没有意图才测音频峰值 —— 已经在放就别按，否则会
   「按暂停反而开始播」。之所以需要意图缓存：客户端暂停后有约 **900 ms 的淡出**，恢复后有约
@@ -669,10 +757,16 @@ Linux 上是 `playerctl` + `pactl`。
 | 进度条不出现 / 时间显示 `—` | `health?deep=1` 里 `elog.available: false` → 看 `elog.reason`（`missing` / `no-track-yet` / `client-exited`），或 `elogEnabled` 被关了 |
 | 拖了进度没反应 / 返回 `seek-unsupported` | `reg query HKLM\SOFTWARE\Classes\orpheus` 有没有那条 `--webcmd` —— 没有就是客户端版本太老或安装方式特殊；返回 `channel: smtc` 说明走的是会话车道，不是 orpheus |
 | 跳进度时客户端窗口闪一下 | 预期行为：客户端收到任何 orpheus 消息都会 `showWindow`，helper 在投递前遮、投递后按。若托盘态也露出来，看 `MuteShadows` / `Ghost` 是否被 `userGrace` 跳过（0.3.0 起豁免期只关「按回」，不关遮罩） |
-| 跳完进度顶部一条白带 | 那 4 个 `OrpheusShadow` 又被排到主窗口上面了。正常路径下 `MuteShadows()` 在投递前就清空它们的 region；若反复出现，确认 helper 不是旧版本（`health?deep=1` 的 `stderr` 里有没有 PowerShell 编译错） |
+| 跳完进度顶部一条白带 | 那 4 个 `OrpheusShadow` 又被排到主窗口上面了。0.4.0 起 `MuteShadows()` 不再挑窗口状态、每次投递前都清空它们的 region，所以正常路径下不该再出现；若仍出现，确认 helper 不是旧版本（`health?deep=1` 的 `stderr` 里有没有 PowerShell 编译错），再 dump 一轮窗口看 8 个 `OrpheusShadow` 的 `rgn kind` 是不是全为 `1` |
 | 跳进度后窗口变成 159×27 的小条 | `rcNormalPosition` 被写成了最小化的假几何。0.3.0 起收尾会检查 `< 200 px` 或 `<= -20000` 并写回原矩形；旧版本只能手动拖回来 |
-| 桌面版里悬浮框报错 / 一直「后台没响应」 | `/health` 的 `transport` 是不是 `none`；再确认 `node scripts/enable-desktop.mjs --check` 的两个「已就绪」，以及跑完脚本有没有重启 dsh-desktop |
-| 桌面版启动后插件不见了 | home patch 里那段是不是被 `disabled` 求值成 `true`（表达式只看树里有没有 `@dsh-desktop/client`） |
+| 点「今日推荐」返回 `daily-needs-login` | 日推接口回了空列表。未登录时它**不报 401**而是 200 + `recommend: []`（见「每日推荐」）。`detail` 里 `no cookie` = 压根没解密出 cookie；`empty recommend list` = 有 cookie 但列表为空。两边都指向「在客户端里登录一次」 |
+| 点「今日推荐」返回 `daily-no-cookie` | `LocalPrefs.json` 的 `os_crypt.encrypted_key` 解不开（DPAPI 失败 / 目录结构变了）。确认 `dailyProfileDir` 指的目录里同时有 `Cookies` 与 `LocalPrefs.json` |
+| 点「今日推荐」返回 `daily-no-client` | 客户端没在运行。协议命令投出去没人接 |
+| 点「今日推荐」返回 `daily-network` | 拉接口失败（网络 / 接口地址被改）。可用 `dailyApiBase` 换个镜像地址 |
+| 点「今日推荐」返回 `daily-failed` | 客户端没接住 webcmd。`detail` 里带 `code:` 就是 `playDaily` 那一轮的原始错误；`no-client` 之外的都先看客户端是不是 3.x 桌面版 |
+| 日推起播后歌名短暂不对 | 客户端走 webcmd 起播时只发 `started`（没有歌名），`lib/elog.mjs` 会把 `track` 清成只带 `songId` 的空壳，界面退回窗口标题兜底，稍后自行补上 |
+| 连点两次「今日推荐」 | 预期行为：第二次直接并到第一次的结果上（`deduped: true`），不会投第二遍 webcmd |
+| 桌面版里悬浮框报错 / 一直「后台没响应」 | `/health` 的 `transport` 是不是 `none`；再确认 `node scripts/enable-desktop.mjs --check` 的两个「已就绪」，以及跑完脚本有没有重启 dsh-desktop || 桌面版启动后插件不见了 | home patch 里那段是不是被 `disabled` 求值成 `true`（表达式只看树里有没有 `@dsh-desktop/client`） |
 | web profile 里报 `webserver: duplicate exact route` | 两条车道同时存在（home patch 的 `!!js` 条件失效或被手改过）。`node scripts/enable-desktop.mjs --remove` 即可 |
 | 桌面版里 403 forbidden | 旧世代车道的栅栏挡住了：确认是你的浏览器在访问（不是跨站页面），非回环部署要设 `DSH_TRUSTED_HOSTS` |
 | `npm run sync` 说「这里不是 git 仓库」 | `.git` 没跟着目录走。`git clone` 一份新的，把改动覆盖进去 |
