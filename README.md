@@ -68,15 +68,17 @@
 
 ## 装
 
+> **暂未上传 npm。** 下面每条命令都带 `github:` 前缀，照抄就行 —— 别用 `add` 后面只跟包名那种写法，registry 上没有这个包，装不到东西。
+
 ```bash
 # Web / CLI
-dsh plugin --profile web add dsh-cloudmusic-player
+dsh plugin --profile web add github:jx70/dsh-cloudmusic-player
 ```
 
 ```bash
 # dsh 桌面版（dsh-desktop）
-dsh plugin --profile desktop add dsh-cloudmusic-player
-node scripts/enable-desktop.mjs      # 把包接进桌面 profile（幂等）
+dsh plugin --profile desktop add github:jx70/dsh-cloudmusic-player
+node scripts/enable-desktop.mjs      # 把包接进桌面 profile（幂等）；在 clone 下来的目录里跑
 ```
 
 然后重开 DSH。右下角出现小胶囊，点 ⌃ 展开。
