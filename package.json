@@ -1,6 +1,6 @@
 {
   "name": "dsh-cloudmusic-player",
-  "version": "0.7.19",
+  "version": "0.7.20",
   "description": "DSH 悬浮播放器：联动本地网易云音乐客户端或网页版，调音量 / 切歌 / 喜欢红心 / 跳进度 / 滚动歌词 / 一键日推",
   "keywords": [
     "dsh",
@@ -16,11 +16,11 @@
   "author": "dsh-cloudmusic-player contributors",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jx70/dsh-cloudmusic-player.git"
+    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-cloudmusic-player.git"
   },
-  "homepage": "https://github.com/jx70/dsh-cloudmusic-player#readme",
+  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-cloudmusic-player#readme",
   "bugs": {
-    "url": "https://github.com/jx70/dsh-cloudmusic-player/issues"
+    "url": "https://github.com/YOUR_GITHUB_USER/dsh-cloudmusic-player/issues"
   },
   "type": "module",
   "main": "index.js",

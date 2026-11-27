@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.7.20] - 2026-11-27
+
+### 维护
+
+- 文档、包元数据与同步脚本中的仓库地址改为占位符，移除个人信息；本地 git 署名改为中性 contributors。无功能变更。
+
 ## [0.7.19] - 2026-11-22
 
 修复操作过 B 站视频后，插件无法暂停网易云歌（报 no-browser-music-session / 没反应）的问题。

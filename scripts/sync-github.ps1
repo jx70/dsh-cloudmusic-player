@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     把本地改动同步到 GitHub：补 remote → add → commit → push。
 
@@ -51,7 +51,7 @@ try {
         Fail @'
 这里不是 git 仓库（.git 丢了？）。
 换机器/换目录后的恢复办法：
-  git clone https://github.com/jx70/dsh-cloudmusic-player.git <新目录>
+  git clone https://github.com/YOUR_GITHUB_USER/dsh-cloudmusic-player.git <新目录>
 然后把你的改动覆盖进去，再跑一次 npm run sync。
 （注意：clone 时本地 node_modules 会被跳过，需要时跑一次 npm install。）
 '@
