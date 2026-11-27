@@ -24,8 +24,11 @@ import z from '@deepseek-ai/schemastery'
 import { selectBackend } from './lib/backend.mjs'
 import { homeDirOf } from './lib/cache.mjs'
 import { DailyService } from './lib/daily.mjs'
+import { LikeService } from './lib/like.mjs'
 import { LyricsService } from './lib/lyrics.mjs'
 import { PlayerService, PLAYER_DEFAULTS } from './lib/player.mjs'
+import { WebBackend } from './lib/web-backend.mjs'
+import { ChannelRouter } from './lib/channel.mjs'
 import { mountTransport } from './lib/transport.mjs'
 
 export const name = 'cloudmusic-player'
@@ -48,6 +51,45 @@ export const Config = z.object({
     .string()
     .default('cloudmusic|netease|wangyi')
     .description('系统媒体会话的 AppUserModelId 正则。商店/UWP 版可能要改成 CloudMusic.exe 之类，用 /health?deep=1 查'),
+
+  // ── 播放通道 ────────────────────────────────────────────────────────────
+  // k65：客户端没装/没开时，用 ego 浏览器驱动网易云网页版跑同样的 action。
+  // 默认「客户端优先」——客户端在线时行为完全不变；探测到助手不可用时自动切网页。
+  channelMode: z
+    .union([z.const('client-first'), z.const('web-first'), z.const('client-only'), z.const('web-only')])
+    .default('client-first')
+    .description('播放通道：client-first=客户端优先（默认，掉线自动切网页）/ web-first=网页优先 / client-only=仅客户端 / web-only=仅网页版')
+    .volatile(),
+  webBrowserJson: z
+    .string()
+    .default('')
+    .description('ego 浏览器 browser.json 路径。留空 = 自动（Windows 用 %LOCALAPPDATA%\\ego-lite-linux\\browser.json）'),
+  webLoginCookie: z
+    .string()
+    .default('')
+    .description('网页版登录 cookie（Cookie 头原文）。留空 = 自动复用客户端解出的 cookie 或浏览器已登录会话'),
+  webAutoInjectCookie: z
+    .boolean()
+    .default(true)
+    .description('自动把客户端解出的登录 cookie 注入 ego 浏览器，复用登录态（默认开）')
+    .volatile(),
+  webSongUrlLevel: z
+    .union([z.const('standard'), z.const('exhigh'), z.const('lossless'), z.const('hires')])
+    .default('standard')
+    .description('网页版音频质量（standard/exhigh/lossless/hires）。无损需 VIP，拿不到会自动降级'),
+
+  // k65 补：网页版走系统媒体会话（SMTC）识别/控制个人浏览器正在放的歌。
+  // ego-lite 网页是「去客户端播放」占位、用户真正在放的浏览器没有 CDP 端口——
+  // SMTC 是唯一能读到那首歌的公共通道。默认开；关掉则只走 CDP。
+  smtcEnabled: z
+    .boolean()
+    .default(true)
+    .description('网页版通道用系统媒体会话(SMTC)识别/控制个人浏览器正在放的歌（默认开）')
+    .volatile(),
+  smtcBrowserAumid: z
+    .string()
+    .default('msedge\\.exe|chrome\\.exe|firefox\\.exe|MSWebView2|msedgewebview2')
+    .description('SMTC 命中的浏览器进程 AUMID 正则。留空 = 用默认的 Edge/Chrome/Firefox/WebView2 白名单'),
 
   // ── 音量 ────────────────────────────────────────────────────────────────
   volumeScope: z
@@ -96,6 +138,10 @@ export const Config = z.object({
     .string()
     .default('Ctrl+Alt+Left')
     .description('上一首的全局快捷键'),
+  hotkeyLike: z
+    .string()
+    .default('Ctrl+Alt+L')
+    .description('喜欢/取消喜欢的全局快捷键（默认 love=Ctrl+Alt+L；在 DSH 里点红心会用它同步客户端本地红心，需与客户端设置一致）'),
 
   // ── 进度来源（客户端日志）────────────────────────────────────────────────
   // FAQ：进度条为什么能动了。网易云 3.x 不注册 SMTC，但它把播放事件写进
@@ -139,6 +185,21 @@ export const Config = z.object({
     .default('')
     .description('客户端 CEF profile 目录。留空 = 自动找 %LOCALAPPDATA%\\NetEase\\CloudMusic\\webapp* 里 Cookies 最新的那个'),
 
+  // ── 喜欢（红心）────────────────────────────────────────────────────────────
+  // 走网易云 Web API + 客户端 cookie（不投 webcmd、不弹客户端窗口）。
+  likeApiBase: z
+    .string()
+    .default('')
+    .description('喜欢接口前缀。留空 = 跟随 dailyApiBase；方便换成镜像/反代'),
+  likeSyncMs: z
+    .number()
+    .step(1000)
+    .min(2000)
+    .max(60000)
+    .default(8000)
+    .description('同一首歌期间同步红心状态的间隔（毫秒）。客户端日志无喜欢事件，只能轮询；越小越及时、请求越多')
+    .volatile(),
+
   // ── 助手进程 ────────────────────────────────────────────────────────────
   powershellPath: z
     .string()
@@ -170,6 +231,13 @@ export const Config = z.object({
 export const DEFAULTS = {
   processName: 'cloudmusic',
   aumidPattern: 'cloudmusic|netease|wangyi',
+  channelMode: 'client-first',
+  webBrowserJson: '',
+  webLoginCookie: '',
+  webAutoInjectCookie: true,
+  webSongUrlLevel: 'standard',
+  smtcEnabled: true,
+  smtcBrowserAumid: 'msedge\\.exe|chrome\\.exe|firefox\\.exe|MSWebView2|msedgewebview2',
   volumeScope: 'process',
   lyricsEnabled: true,
   lyricsTranslation: true,
@@ -180,12 +248,15 @@ export const DEFAULTS = {
   hotkeyPlayPause: 'Ctrl+Alt+P',
   hotkeyNext: 'Ctrl+Alt+Right',
   hotkeyPrev: 'Ctrl+Alt+Left',
+  hotkeyLike: 'Ctrl+Alt+L',
   elogEnabled: true,
   elogPath: '',
   elogPollMs: 400,
   dailyApiBase: 'https://music.163.com/api',
   dailyLimit: 50,
   dailyProfileDir: '',
+  likeApiBase: '',
+  likeSyncMs: 8000,
   requestTimeoutMs: PLAYER_DEFAULTS.requestTimeoutMs,
   restartLimit: PLAYER_DEFAULTS.restartLimit,
 }
@@ -255,6 +326,9 @@ export function apply(ctx, config) {
   const getConfig = () => ({
     ...settings,
     ...(config ?? {}),
+    channelMode: unwrapVolatile(config?.channelMode) ?? settings.channelMode,
+    webAutoInjectCookie: unwrapVolatile(config?.webAutoInjectCookie) ?? settings.webAutoInjectCookie,
+    smtcEnabled: unwrapVolatile(config?.smtcEnabled) ?? settings.smtcEnabled,
     volumeScope: unwrapVolatile(config?.volumeScope) ?? settings.volumeScope,
     lyricsEnabled: unwrapVolatile(config?.lyricsEnabled) ?? settings.lyricsEnabled,
     lyricsTranslation: unwrapVolatile(config?.lyricsTranslation) ?? settings.lyricsTranslation,
@@ -268,8 +342,20 @@ export function apply(ctx, config) {
   const backend = selectBackend()
   const cacheDir = homeDirOf(ctx)
   const daily = new DailyService({ getConfig, log })
-  const player = new PlayerService({ backend, getConfig, log, daily })
+  const like = new LikeService({ getConfig, log })
+  const native = new PlayerService({ backend, getConfig, log, daily, like })
   const lyrics = new LyricsService({ getConfig }, cacheDir)
+
+  // k65：网页版通道。歌词/LRC 解析复用同一个 LyricsService，登录态由后端自己
+  // 从客户端 cookie 注入 ego 浏览器。上层只认 player（ChannelRouter），接口形状
+  // 与原生 PlayerService 一致，client-first 模式下客户端在线时走的路跟以前一模一样。
+  const web = new WebBackend({ getConfig, log, daily })
+  web.like = like
+  web.lyricsResolver = (params) => lyrics.resolve(params)
+  // 系统音量是 Windows 端点级、与播放通道无关：网页版通道复用 native helper 的
+  // 音量读写（不依赖客户端进程，独立实测可读）。这样切到 SYS 能调、也能跟随系统。
+  web.systemVolumeService = native
+  const player = new ChannelRouter({ native, web, getConfig, log })
 
   /** 路由最终走的是哪条车道（fetch / webserver / none），/health 会报出去 */
   let transportState = { transport: 'pending', note: '' }
@@ -310,6 +396,7 @@ export function apply(ctx, config) {
         const result = await player.action(action, {
           positionMs: num(body.positionMs, 0),
           value: body.value == null ? undefined : String(body.value),
+          like: body.like == null ? undefined : !!body.like,
         })
         return jsonResponse(result)
       }),
@@ -377,8 +464,9 @@ export function apply(ctx, config) {
         const helper = player.readyInfo()
         return jsonResponse({
           ok: true,
-          platform: backend.platform,
-          backend: backend.id,
+          platform: helper.platform || backend.platform,
+          backend: helper.backend || backend.id,
+          channel: player.active,
           transport: transportState.transport,
           transportNote: transportState.note,
           capabilities: helper.capabilities,
@@ -387,9 +475,8 @@ export function apply(ctx, config) {
           seekWindowLeak: player.windowLeak !== false,
           helper,
           lyrics: { enabled: lyrics.enabled(), base: lyrics.base() },
-          // 日推依赖客户端登录态（cookie 从客户端 CEF profile 解出来），
-          // 非 Windows 直接没有这条路
-          daily: { available: backend.platform === 'win32' },
+          // k65：网页版和客户端都能拉日推（网页版靠注入的 cookie 走同一套 Web API）
+          daily: { available: backend.platform === 'win32' || player.active === 'web' },
         })
       }),
     },
@@ -462,17 +549,19 @@ export function apply(ctx, config) {
         + '看当前在放什么。还可以取当前这首歌的歌词（带时间轴，LRC 解析后的行数组）。'
         + 'play_daily 会把它切到「每日推荐」并从第一首开始播（借客户端已登录的 cookie 取日推列表）。'
         + 'set_mode 切换播放顺序（顺序/列表循环/单曲循环/随机）。'
+        + 'like 收藏/取消收藏当前歌曲到「我喜欢的音乐」（会同步客户端本地红心，走客户端全局热键不弹窗；失败回退 Web API，需要客户端已登录）。'
         + '客户端没开时会返回 ok:false 与提示，不抛错。',
       parameters: {
         type: 'object',
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health', 'play_daily', 'set_mode'],
+            enum: ['status', 'play', 'pause', 'toggle', 'next', 'prev', 'seek', 'volume', 'mute', 'lyrics', 'health', 'play_daily', 'set_mode', 'like'],
             description:
               '要做什么。status 看当前状态；volume 需要 level；mute 需要 muted；seek 需要 positionMs；'
               + 'play_daily 播放每日推荐（替换队列，从第一首开始）；'
-              + 'set_mode 切换播放顺序（value 取 cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序）',
+              + 'set_mode 切换播放顺序（value 取 cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序）；'
+              + 'like 收藏/取消收藏当前歌曲（like 为 true 收藏、false 取消，省略则切换）',
           },
           positionMs: { type: 'integer', description: 'seek 的目标位置（毫秒）' },
           level: { type: 'number', description: 'volume 的目标音量，0..1' },
@@ -481,6 +570,10 @@ export function apply(ctx, config) {
             type: 'string',
             enum: ['cycle', 'single', 'random', 'order'],
             description: 'set_mode 的目标播放顺序：cycle 列表循环 / single 单曲循环 / random 随机 / order 顺序',
+          },
+          like: {
+            type: 'boolean',
+            description: 'like 的目标状态：true=收藏到「我喜欢的音乐」，false=取消；省略则按当前状态切换',
           },
           scope: {
             type: 'string',
@@ -521,16 +614,20 @@ export function apply(ctx, config) {
           // 进度来源有三种：smtc（系统给的准值）、elog（客户端日志，靠 orpheus 协议 seek）、
           // peak（峰值估算，没有时间轴）。别在 peak 状态下报一个假的 0:00 / 0:00。
           const hasTimeline = Number(n.end) > 0
-          const src = n.positionSource === 'elog' ? '客户端日志' : n.positionSource === 'smtc' ? '系统媒体会话' : '峰值估算'
+          const src = n.positionSource === 'elog' ? '客户端日志' : n.positionSource === 'smtc' ? '系统媒体会话' : n.positionSource === 'smtc-web' ? '系统媒体（浏览器）' : n.positionSource === 'winrt' ? '日推后台播放' : n.positionSource === 'web' ? '网页版' : '峰值估算'
           const progress = hasTimeline
             ? `进度 ${fmt(n.pos)} / ${fmt(n.end)}（来自${src}${n.canSeek ? '，可 seek' : '，不能 seek'}）`
             : `进度：${src}拿不到时间轴（无法 seek）`
-          const lane = n.channel === 'native' ? '原生车道（窗口标题 + 音频峰值 + 客户端全局热键 + orpheus 协议 seek）' : '系统媒体会话（SMTC）'
+          const lane = n.channel === 'web' ? '网页版（ego 浏览器 + 在线音频）'
+            : n.channel === 'native' ? '原生车道（窗口标题 + 音频峰值 + 客户端全局热键 + orpheus 协议 seek）' : '系统媒体会话（SMTC）'
           return [
-            `${status} · ${n.title || '(无标题)'}${n.artist ? ` - ${n.artist}` : ''}`,
+            `${status} · ${n.title || '(无标题)'}${n.artist ? ` - ${n.artist}` : ''}${n.liked === true ? ' ♥ 已喜欢' : ''}`,
             progress,
             vol,
             `通道 ${lane}`,
+            n.mode && { playOrder: 1, playCycle: 1, playOneCycle: 1, playRandom: 1 }[n.mode]
+              ? `播放顺序 ${{ playOrder: '顺序', playCycle: '列表循环', playOneCycle: '单曲循环', playRandom: '随机' }[n.mode]}`
+              : '',
           ].filter(Boolean).join('\n')
         }
 
@@ -542,6 +639,7 @@ export function apply(ctx, config) {
             const h = await player.deepHealth()
             return {
               text: [
+                `当前通道 ${h.channel || player.active}${h.loggedIn !== undefined ? ` · 网页登录 ${h.loggedIn ? '已登录' : '未登录'}` : ''}`,
                 `平台 ${h.platform} · 后端 ${h.backend} · PowerShell ${h.ps || '?'} · WinRT ${h.winrt ? 'ok' : '不可用'} · 窗口 ${h.window ? 'ok' : '不可用'}`,
                 `进程 ${(h.pids || []).join(', ') || '(无)'} · 目标会话 ${h.target || '(SMTC 未匹配，走原生车道)'}`,
                 `媒体会话：${(h.media || []).map((m) => `${m.aumid}${m.title ? `(${m.title})` : ''}`).join(' / ') || '(无)'}`,
@@ -614,6 +712,11 @@ export function apply(ctx, config) {
             const res = await player.action('set_mode', { value })
             if (!res.ok) return { text: `切换播放顺序失败：${res.message || res.error || 'unknown'}${res.detail ? ` (${res.detail})` : ''}` }
             return { text: `播放顺序已切到 ${labels[value]}。` }
+          }
+          if (action === 'like') {
+            const res = await player.action('like', { like: args?.like })
+            if (!res.ok) return { text: `${res.message || '操作失败'}（${res.error || 'unknown'}${res.detail ? `, ${res.detail}` : ''}）` }
+            return { text: `${res.liked ? '已收藏到「我喜欢的音乐」' : '已取消喜欢'}。${describe({ ok: true, now: res.now, volume: res.volume })}` }
           }
           const res = await player.action(action, { positionMs: num(args?.positionMs, 0) })
           if (!res.ok) {

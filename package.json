@@ -1,7 +1,7 @@
 {
   "name": "dsh-cloudmusic-player",
-  "version": "0.5.0",
-  "description": "DSH 悬浮播放器：联动本地网易云音乐客户端，调音量 / 切歌 / 跳进度 / 滚动歌词 / 一键日推",
+  "version": "0.7.19",
+  "description": "DSH 悬浮播放器：联动本地网易云音乐客户端或网页版，调音量 / 切歌 / 喜欢红心 / 跳进度 / 滚动歌词 / 一键日推",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -47,7 +47,7 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test test/elog.test.mjs test/lyrics.test.mjs test/transport.test.mjs test/daily.test.mjs",
+    "test": "node --test test/elog.test.mjs test/lyrics.test.mjs test/transport.test.mjs test/daily.test.mjs test/like.test.mjs test/channel.test.mjs test/web-backend.test.mjs test/smtc-browser.test.mjs",
     "enable-desktop": "node scripts/enable-desktop.mjs",
     "sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-github.ps1"
   },

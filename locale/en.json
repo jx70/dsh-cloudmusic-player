@@ -1,13 +1,18 @@
 {
   "meta": {
     "title": "NetEase Music Player",
-    "description": "A small floating player inside DSH, wired to your local NetEase Cloud Music client: prev / play-pause / next, drag the volume, scrolling lyrics."
+    "description": "A small floating player inside DSH, wired to your local NetEase Cloud Music client: prev / play-pause / next, a like heart, drag the volume, scrolling lyrics."
   },
   "player": {
     "play": "Play",
     "pause": "Pause",
     "next": "Next",
     "prev": "Previous",
+    "like": "Like",
+    "unlike": "Unlike",
+    "albumLabel": "Album",
+    "sourceLabel": "Source",
+    "sourceUnknown": "Unknown",
     "volume": "Volume",
     "lyrics": "Lyrics",
     "close": "Collapse",

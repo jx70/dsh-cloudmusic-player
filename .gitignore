@@ -29,3 +29,6 @@ tmp-*.json
 *.tmp
 *.bak
 *.orig
+
+# npm pack 产物（发布用，不进仓库）
+*.tgz

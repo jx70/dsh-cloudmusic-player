@@ -18,3 +18,9 @@
         aumidPattern: "cloudmusic|netease|wangyi"
         volumeScope: process
         lyricsEnabled: true
+        # k65 播放通道：默认客户端优先，客户端掉线自动切网易云网页版
+        channelMode: client-first
+        webAutoInjectCookie: true
+        webSongUrlLevel: standard
+        # k65 补：用系统媒体会话识别/控制个人浏览器正在放的网页音乐（默认开）
+        smtcEnabled: true

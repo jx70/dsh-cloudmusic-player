@@ -6,7 +6,7 @@
 
 **DSH 里的一块悬浮小播放器，联动你本机的网易云音乐客户端。**
 
-切歌 · 播放暂停 · 拖音量 · 跟着滚的歌词（外语歌带中文译文）
+切歌 · 播放暂停 · 喜欢红心 · 拖音量 · 跟着滚的歌词（外语歌带中文译文）
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-3da639.svg?style=flat-square)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A522-5fa04e.svg?style=flat-square)](package.json)
@@ -26,7 +26,9 @@
 | 能做什么 | 说明 |
 |---|---|
 | **一键日推** | 展开态点「今日推荐」，客户端队列直接换成今天的每日推荐、从第一首开始播。借的是客户端自己的登录态，插件不新建会话 |
+| **喜欢红心** | 展开态「下一首」右边的红心，点一下把当前歌收藏进「我喜欢的音乐」或取消，已喜欢填实心红。在 DSH 里点红心会**同步客户端本地红心**：走客户端全局 love 热键（默认 Ctrl+Alt+L），同 keybd_event 发键、**不 Activate、不投 webcmd，全程不弹窗**；失败才回退 Web API + cookie 写服务端。红心状态每 8 秒与网易云同步一次，在客户端点红心后插件也会跟随（可用 `likeSyncMs` / `hotkeyLike` 配置调节） |
 | **换歌 / 播放暂停** | 上一首、下一首、播放暂停 |
+| | **歌手右边的专辑 / 来源** | 大卡片歌名下那一行，在歌手后接着显示「专辑：X · 来源：Y」，和客户端「歌曲信息」里的一致。歌名/歌手/专辑取自客户端播放事件，来源取客户端 `refreshCurPlaying` 的最近一次来源（如「临时」「每日歌曲推荐」；没有来源就不显示） |
 | **音量** | `APP` 只改网易云自己的音量（不动别的程序，也不动系统总音量）；`SYS` 改系统总音量。两路各自独立读数 |
 | **滚动歌词** | 当前行居中高亮、上下淡出；进度连续插值，不是两秒跳一格 |
 | **拖进度** | 展开态拖进度条或按 ← / →（±5 s，Shift ±10 s）真的跳转，Home / End 到头尾 |
@@ -68,18 +70,18 @@
 
 ## 装
 
-> **暂未上传 npm。** 下面每条命令都带 `github:` 前缀，照抄就行 —— 别用 `add` 后面只跟包名那种写法，registry 上没有这个包，装不到东西。
-
 ```bash
-# Web / CLI
-dsh plugin --profile web add github:jx70/dsh-cloudmusic-player
+# Web / CLI（npm）
+dsh plugin --profile web add dsh-cloudmusic-player
 ```
 
 ```bash
 # dsh 桌面版（dsh-desktop）
-dsh plugin --profile desktop add github:jx70/dsh-cloudmusic-player
+dsh plugin --profile desktop add dsh-cloudmusic-player
 node scripts/enable-desktop.mjs      # 把包接进桌面 profile（幂等）；在 clone 下来的目录里跑
 ```
+
+> npm 包暂时落后于 GitHub 时，可以指定 GitHub 源装最新版：把上面的包名换成 `github:jx70/dsh-cloudmusic-player`。
 
 然后重开 DSH。右下角出现小胶囊，点 ⌃ 展开。
 
@@ -164,14 +166,16 @@ macOS / Linux 上插件照样能装：悬浮框和歌词都在，只是播放控
         hotkeyPlayPause: 'Ctrl+Alt+P'    # 要和客户端「设置 → 快捷键」里一致
         hotkeyNext: 'Ctrl+Alt+Right'
         hotkeyPrev: 'Ctrl+Alt+Left'
+        hotkeyLike: 'Ctrl+Alt+L'         # 喜欢热键，用于把 DSH 的红心操作同步到客户端
         elogEnabled: true                # 读客户端日志拿真进度
         elogPath: ''                     # 留空 = 自动找
         elogPollMs: 400
+        likeSyncMs: 8000                 # 同一首歌期间同步红心状态的间隔（2000–60000）
 ```
 
 其余（`lyricsApiBase` / `requestTimeoutMs` / `restartLimit`）见 [`docs/DESIGN.md`](docs/DESIGN.md#配置全表)。
 
-标了 `.volatile()` 的几项（`volumeScope` / `lyricsEnabled` / `lyricsTranslation` / `lyricsOffsetMs` / `requestTimeoutMs` / `restartLimit` / `elogEnabled` / `elogPollMs`）改完**即时生效**，不用重载。
+标了 `.volatile()` 的几项（`volumeScope` / `lyricsEnabled` / `lyricsTranslation` / `lyricsOffsetMs` / `requestTimeoutMs` / `restartLimit` / `elogEnabled` / `elogPollMs` / `likeSyncMs`）改完**即时生效**，不用重载。
 
 ---
 
@@ -190,6 +194,7 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 | 显示「没在放歌」 | 网易云真在放吗？`pids` 空 = `processName` 不对 |
 | 按暂停暂停的是别的程序 | 不该发生了。看 `media[].aumid` 是不是被写进了 `aumidPattern` |
 | 切歌没反应 | `hotkeyNext` / `hotkeyPrev` 和客户端的全局快捷键不一致 |
+| 点红心后客户端红心没变 | `hotkeyLike` 和客户端「设置 → 快捷键 → 喜欢」不一致；或改过默认 `Ctrl+Alt+L`。会自动回退 Web API 写服务端（红心值对、客户端本地 UI 要等它自己刷新） |
 | 进度条不出现 | `elog.available: false` → 看 `elog.reason`（`missing` / `no-track-yet` / `client-exited`） |
 | 拖了进度没反应 | 看 `/action` 的返回：`ok: false` 说明 `orpheus` 协议没注册（`reg query HKLM\SOFTWARE\Classes\orpheus`）；`channel: smtc` 说明走的不是这条路 |
 | 跳进度时客户端闪一下 | 正常：客户端收到协议消息必弹窗，helper 会把它按回去。托盘态一帧不露，最小化态只在屏外动，可见态位置不动 |
@@ -216,7 +221,9 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 5. **播放暂停是切换键**。为防「按暂停反而开始播」，发键前先看 2.6 秒内的意图缓存，没有才采 ~150 ms 峰值判定。极静的段落仍可能误判。
 6. **只有 Windows 有真实后端**，且必须 PowerShell 5.1。
 7. 歌词与译文都来自网易云的 web 接口（非公开），可能限流或改字段；译文翻错、翻得少是数据源的事，插件不补译。
-8. **「今日推荐」依赖客户端已登录**。未登录时接口回 200 + 空数组（不报 401），插件据此提示「请先在网易云客户端登录」；cookie 随客户端刷新，失效后重新登录客户端即可。日推起播的那一刻客户端只发 `started` 事件（没有歌名），歌名会稍晚补上。
+8. **网页版里手动点的那首，第一次要由插件点一次播放**。网易云已经把 `music.163.com` 的网页播放器换成「去客户端播放」占位——页面里没有任何 `<audio>`，`window.player.addTo()` 空转，播放栏停在 `00:00 / 00:00`。插件能拿到你点的那首的 `songId`（`getPlaying().track`），但要在同一个页面里自己注入 `<audio>` 才会出声，所以：手动点播的歌，第一次从插件点一下播放（插件按 `songId` 取 URL 并接管），之后 play / pause / 拖进度就都正常了。在这之前拖进度会提示「先点一次播放」。
+9. **无版权 / 需 VIP 的歌拿不到播放地址**（接口回 `code:404, url:null`，例如「晴天」），返回 `web-no-audio-url`。这与客户端里的表现一致，不是插件的问题。
+10. **「今日推荐」依赖客户端已登录**。未登录时接口回 200 + 空数组（不报 401），插件据此提示「请先在网易云客户端登录」；cookie 随客户端刷新，失效后重新登录客户端即可。日推起播的那一刻客户端只发 `started` 事件（没有歌名），歌名会稍晚补上。
 
 完整的 18 条（含版权曲目匹配、日志编码版本依赖、旧世代宿主鉴权水位等）在 [`docs/DESIGN.md`](docs/DESIGN.md#已知限制完整)。
 
@@ -225,7 +232,7 @@ http://127.0.0.1:3080/api/cloudmusic-player/health?deep=1
 ## 开发
 
 ```bash
-npm test                      # 105 条：日志解码 31 + 歌词 25 + 传输层 21 + 日推 28
+npm test                      # 170 条：日志解码 31 + 歌词 25 + 传输层 21 + 日推 28 + 红心 10 + 通道 5 + 网页后端 6 + 其余
 node --test test/elog.test.mjs   # 单个文件（目录形式会 Cannot find module）
 npm run enable-desktop        # = node scripts/enable-desktop.mjs
 npm run sync                  # 推 GitHub

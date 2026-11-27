@@ -13,7 +13,7 @@
 # 请求：{"seq":1,"cmd":"state"}
 # 回复：{"type":"reply","seq":1,"ok":true,"cmd":"state","now":{...},"volume":{...}}
 #
-# 命令：ping state refresh play pause toggle next prev seek volume mute procs deep quit
+# 命令：ping state refresh play pause toggle next prev seek volume mute setMode setLike procs deep quit
 #
 # 注意：本文件必须存为 UTF-8 **带 BOM**，否则 PowerShell 5.1 会按 ANSI
 #       解码，中文注释可能被截断成非法字节。
@@ -25,7 +25,10 @@ param(
   # 客户端自己的全局热键。SMTC 拿不到会话时靠它控制播放。
   [string]$HotkeyPlayPause = 'Ctrl+Alt+P',
   [string]$HotkeyNext = 'Ctrl+Alt+Right',
-  [string]$HotkeyPrev = 'Ctrl+Alt+Left'
+  [string]$HotkeyPrev = 'Ctrl+Alt+Left',
+  # 客户端「喜欢/取消喜欢」的全局热键（默认 love = Ctrl+Alt+L）。
+  # 与播放热键一样用 keybd_event 发键，不 Activate、不投 webcmd，因此不弹窗。
+  [string]$HotkeyLike = 'Ctrl+Alt+L'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -2996,9 +2999,10 @@ function Get-Volume($procName) {
 }
 
 # 回读「实际写入的那一路」。SYS 车道写完却回 APP 读数，界面就会看着像弹回原值。
-function Get-VolumeAt([string]$scope) {
+function Get-VolumeAt([string]$scope, [string]$procName) {
+  $target = if ($procName) { $procName } else { $ProcessName }
   if ($scope -eq 'process') {
-    $pv = Get-ProcessVolume $ProcessName
+    $pv = Get-ProcessVolume $target
     if ($pv -ne $null) { return $pv }
     return $null
   }
@@ -3006,16 +3010,19 @@ function Get-VolumeAt([string]$scope) {
   return $null
 }
 
-function Set-Volume($level, $scope) {
+function Set-Volume($level, $scope, [string]$procName, [bool]$noFallback = $false) {
   if ($level -lt 0) { $level = 0 }
   if ($level -gt 1) { $level = 1 }
-  if ($scope -eq 'process' -and $ProcessName) {
+  $target = if ($procName) { $procName } else { $ProcessName }
+  if ($scope -eq 'process' -and $target) {
     try {
-      foreach ($p in [NcmCore.Api]::Pids($ProcessName)) {
+      foreach ($p in [NcmCore.Api]::Pids($target)) {
         if ([NcmCore.Api]::SetProcVol($p, $level)) { return 'process' }
       }
     } catch { }
-    # 客户端没开（没有音频会话）→ 退系统音量，并如实回报 scope
+    # SMTC 场景明确指定了出声浏览器进程：找不到它的音频会话也绝不退系统音量，
+    # 否则用户拖 APP 音量就会把 SYS 一起拖走。原生通道（未指定 procName）保持旧行为。
+    if ($noFallback) { return '' }
     if ([NcmCore.Api]::SetSysVol($level)) { return 'system' }
     return ''
   }
@@ -3023,13 +3030,15 @@ function Set-Volume($level, $scope) {
   return ''
 }
 
-function Set-Mute($mute, $scope) {
-  if ($scope -eq 'process' -and $ProcessName) {
+function Set-Mute($mute, $scope, [string]$procName, [bool]$noFallback = $false) {
+  $target = if ($procName) { $procName } else { $ProcessName }
+  if ($scope -eq 'process' -and $target) {
     try {
-      foreach ($p in [NcmCore.Api]::Pids($ProcessName)) {
+      foreach ($p in [NcmCore.Api]::Pids($target)) {
         if ([NcmCore.Api]::SetProcMute($p, $mute)) { return 'process' }
       }
     } catch { }
+    if ($noFallback) { return '' }
     if ([NcmCore.Api]::SetSysMute($mute)) { return 'system' }
     return ''
   }
@@ -3287,16 +3296,45 @@ while ($running) {
         }
       }
 
+      # setLike：切换当前曲目的「喜欢/取消喜欢」。
+      # 客户端没有 like 的 webcmd，也不给外部直接调用 setLike 的入口；
+      # 但它注册了全局 love 热键（默认 Ctrl+Alt+L），按下后由客户端自己
+      # toggle 红心并写服务端。这里模拟该热键：keybd_event 发键，不 Activate，
+      # 所以客户端窗口不会被唤起或抢焦点（与播放热键同一条路径）。
+      'setLike' {
+        $t = Get-NativeTarget
+        if ($t -eq $null) {
+          $reply.ok = $false
+          $reply.channel = ''
+          $reply.error = 'no-client'
+          $reply.detail = '网易云客户端没在运行'
+        } else {
+          try {
+            [void][NcmWin.Win]::Hotkey($HotkeyLike)
+            Start-Sleep -Milliseconds 240
+            [NcmWin.Win]::Invalidate()
+            $reply.ok = $true
+            $reply.channel = 'native'
+          } catch {
+            $reply.ok = $false
+            $reply.channel = 'native'
+            $reply.error = $_.Exception.Message
+          }
+        }
+      }
+
       'volume' {
         $scope = [string]$req.scope
         if ([string]::IsNullOrEmpty($scope)) { $scope = 'process' }
-        $applied = Set-Volume ([double]$req.level) $scope
+        $volProc = [string]$req.procName
+        $noFallback = [bool]$req.noFallback
+        $applied = Set-Volume ([double]$req.level) $scope $volProc $noFallback
         $reply.ok = ($applied -ne '')
         $reply.scope = $applied
         # 回读实际写入的那一路：写的是系统端点就回系统读数。
         # 以前这里恒回 Get-Volume（APP 优先），SYS 车道拖完就显示 APP 的旧值。
         $at = $null
-        if ($applied -ne '') { $at = Get-VolumeAt $applied }
+        if ($applied -ne '') { $at = Get-VolumeAt $applied $volProc }
         if ($at -eq $null) { $at = Get-Volume $ProcessName }
         $reply.volume = $at
         $reply.systemVolume = Get-SystemVolume
@@ -3304,11 +3342,13 @@ while ($running) {
       'mute' {
         $scope = [string]$req.scope
         if ([string]::IsNullOrEmpty($scope)) { $scope = 'process' }
-        $applied = Set-Mute ([bool]$req.muted) $scope
+        $volProc = [string]$req.procName
+        $noFallback = [bool]$req.noFallback
+        $applied = Set-Mute ([bool]$req.muted) $scope $volProc $noFallback
         $reply.ok = ($applied -ne '')
         $reply.scope = $applied
         $at = $null
-        if ($applied -ne '') { $at = Get-VolumeAt $applied }
+        if ($applied -ne '') { $at = Get-VolumeAt $applied $volProc }
         if ($at -eq $null) { $at = Get-Volume $ProcessName }
         $reply.volume = $at
         $reply.systemVolume = Get-SystemVolume

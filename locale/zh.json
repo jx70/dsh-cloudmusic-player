@@ -1,13 +1,18 @@
 {
   "meta": {
     "title": "网易云播放器",
-    "description": "在 DSH 里挂一个悬浮小播放器，联动本机网易云音乐客户端：上一首 / 播放暂停 / 下一首、拖音量、滚动歌词。"
+    "description": "在 DSH 里挂一个悬浮小播放器，联动本机网易云音乐客户端：上一首 / 播放暂停 / 下一首、喜欢红心、拖音量、滚动歌词。"
   },
   "player": {
     "play": "播放",
     "pause": "暂停",
     "next": "下一首",
     "prev": "上一首",
+    "like": "喜欢",
+    "unlike": "取消喜欢",
+    "albumLabel": "专辑",
+    "sourceLabel": "来源",
+    "sourceUnknown": "未知",
     "volume": "音量",
     "lyrics": "歌词",
     "close": "收起",

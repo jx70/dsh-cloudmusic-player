@@ -52,6 +52,14 @@ window.__ModuleLoader__.load({
         pause: '暂停',
         next: '下一首',
         prev: '上一首',
+        like: '喜欢',
+        unlike: '取消喜欢',
+        liking: '正在收藏…',
+        likeNoSong: '播放中才能喜欢',
+        likeNeedsLogin: '请先在网易云登录（客户端或网页版）',
+        likeUnavailableSong: '这首歌已下架或版权受限，无法收藏',
+        likeUnavailable: '这台机器还没接「喜欢」功能',
+        likeFailed: '操作失败，请重试',
         mute: '静音',
         unmute: '取消静音',
         volume: '音量',
@@ -97,6 +105,9 @@ window.__ModuleLoader__.load({
         modeSingle: '单曲循环',
         modeRandom: '随机',
         modeNoClient: '没找到播放器，先打开网易云',
+        albumLabel: '专辑',
+        sourceLabel: '来源',
+        sourceUnknown: '未知',
         settings: '设置',
       },
       en: {
@@ -104,6 +115,14 @@ window.__ModuleLoader__.load({
         pause: 'Pause',
         next: 'Next',
         prev: 'Previous',
+        like: 'Like',
+        unlike: 'Unlike',
+        liking: 'Saving…',
+        likeNoSong: 'Play a song to like it',
+        likeNeedsLogin: 'Sign in to NetEase Cloud Music first (client or web)',
+        likeUnavailableSong: 'This song is unavailable or copyright-restricted',
+        likeUnavailable: 'Likes are not wired up on this machine',
+        likeFailed: 'Could not update, try again',
         mute: 'Mute',
         unmute: 'Unmute',
         volume: 'Volume',
@@ -149,6 +168,9 @@ window.__ModuleLoader__.load({
         modeSingle: 'Single loop',
         modeRandom: 'Shuffle',
         modeNoClient: 'No player found — open NetEase first',
+        albumLabel: 'Album',
+        sourceLabel: 'Source',
+        sourceUnknown: 'Unknown',
         settings: 'Settings',
       },
     }
@@ -312,6 +334,18 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M9 18V6.5l10-2v11' }),
         h('circle', { cx: 6.5, cy: 18, r: 2.6 }),
         h('circle', { cx: 16.5, cy: 15.5, r: 2.6 }),
+      )
+    // 喜欢：空心描边 = 未喜欢，实心红 = 已喜欢。实心态用 currentColor，
+    // 颜色交给 CSS 的 .nc-like-btn.liked 控制，深浅主题自适应。
+    const HeartIcon = ({ filled }) =>
+      h(
+        Svg,
+        null,
+        h('path', {
+          d: 'M12 20.3l-1.5-1.35C5.1 14.6 2 11.7 2 8.2 2 5.4 4.2 3.2 7 3.2c1.7 0 3.3.8 4.3 2.1l.7.9.7-.9C13.7 4 15.3 3.2 17 3.2c2.8 0 5 2.2 5 5 0 3.5-3.1 6.4-8.5 10.75z',
+          fill: filled ? 'currentColor' : 'none',
+          stroke: filled ? 'none' : 'currentColor',
+        }),
       )
     // 播放顺序四态图标。MODE 枚举→图标在 MiniPlayer 里查表，这里只画形状。
     const ModeOrderIcon = () =>
@@ -592,6 +626,19 @@ window.__ModuleLoader__.load({
        */
       const playDaily = () => run('play_daily', () => post('/action', { action: 'play_daily' }))
 
+      /**
+       * 喜欢 / 取消喜欢当前歌曲。
+       *
+       * liked 为布尔时前端直接带目标值（省一次服务端查询）；为 null 时让后端
+       * 自己查了再取反。run() 会把返回的 now.liked 回填进 st，红心立即变。
+       * 全程 Web API + cookie，不投 orpheus，所以不会唤起客户端窗口。
+       */
+      const toggleLike = () => {
+        const liked = st && st.now ? st.now.liked : null
+        const extra = typeof liked === 'boolean' ? { like: !liked } : {}
+        return run('like', () => post('/action', { action: 'like', ...extra }))
+      }
+
       const pushVolume = (level) => {
         volLast.current = level
         if (volTimer.current) return
@@ -767,7 +814,18 @@ window.__ModuleLoader__.load({
       const dailyErrText = dailyKey ? t(dailyKey) : ''
       // 播放顺序的错误也走人话提示；非日推/非顺序的错误照旧原样显示
       const modeErrText = err === 'mode-no-client' || err === 'mode-failed' ? t('modeNoClient') : ''
-      const errText = dailyErrText || modeErrText || err
+      // 喜欢的错误也翻成人话
+      const LIKE_TEXT = {
+        'like-no-song': 'likeNoSong',
+        'like-needs-login': 'likeNeedsLogin',
+        'like-no-cookie': 'likeNeedsLogin',
+        'like-unavailable-song': 'likeUnavailableSong',
+        'like-unavailable': 'likeUnavailable',
+        'like-failed': 'likeFailed',
+        'like-network': 'likeFailed',
+      }
+      const likeErrText = err && LIKE_TEXT[err] ? t(LIKE_TEXT[err]) : ''
+      const errText = dailyErrText || modeErrText || likeErrText || err
 
       // 收起态：只留一个胶囊
       if (ui.collapsed) {
@@ -875,9 +933,14 @@ window.__ModuleLoader__.load({
         if (unsupported) return t('unsupportedHint')
         if (degraded) return t('helperDownHint')
         if (!now) return t('idleHint')
-        // 只显示歌手（没有歌手就退到专辑名）。通道名（native / smtc）不再往这儿拼 ——
-        // 那行字会挤掉歌名的宽度，而通道信息真要看的时候 health?deep=1 里有。
-        return now.artist || now.album || ''
+        // 副标题对齐网易云大卡片：歌手 · 专辑：X · 来源：Y。
+        // 专辑取 elog 的 now.album，来源取 client 自己记录的 curPlaying.text
+        // （空文本显示「未知」，与客户端「来源：未知」一致）；没有就不显示该段。
+        const parts = []
+        if (now.artist) parts.push(now.artist)
+        if (now.album) parts.push(`${t('albumLabel')}：${now.album}`)
+        if (now.source) parts.push(`${t('sourceLabel')}：${now.source.text || t('sourceUnknown')}`)
+        return parts.join(' · ')
       })()
 
       return h(
@@ -887,7 +950,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'nc-head', onPointerDown },
           h('div', { className: 'nc-head-main' },
             h('div', { className: 'nc-title', title: now ? now.title : '' }, now ? now.title || '—' : t('idle')),
-            subtitle ? h('div', { className: 'nc-sub' }, subtitle) : null,
+            subtitle ? h('div', { className: 'nc-sub', title: subtitle }, subtitle) : null,
           ),
           h('button', {
             className: 'nc-iconbtn',
@@ -1002,8 +1065,15 @@ window.__ModuleLoader__.load({
             disabled: busy !== '' || !now || now.canNext === false,
             onClick: () => act('next'),
           }, h(NextIcon)),
-          // 对称占位：左侧多了模式按钮，右侧补一个等宽透明块，主播放键才能回到正中央
-          h('span', { className: 'nc-ctrl-spacer' }),
+          // 喜欢（仅在展开态出现，收起态那段 return 在更上面，天然没有它）。
+          // 放在 next 右边，正好顶掉原来的对称占位块：左侧模式按钮、右侧红心，主播放键居中。
+          h('button', {
+            className: `nc-iconbtn nc-like-btn${now && now.liked ? ' liked' : ''}`,
+            title: busy === 'like' ? t('liking') : t(now && now.liked ? 'unlike' : 'like'),
+            'aria-pressed': !!(now && now.liked),
+            disabled: busy !== '' || !now || !now.songId,
+            onClick: toggleLike,
+          }, h(HeartIcon, { filled: !!(now && now.liked) })),
           err || degraded
             ? h('button', { className: 'nc-iconbtn nc-retry', title: t('retry'), disabled: busy !== '', onClick: retry }, h(RefreshIcon))
             : null,
@@ -1266,8 +1336,13 @@ body[data-ds-dark-theme] .nc-root{
 
 /* 播放顺序按钮：跟 prev/next 一样是 28px 图标，但图标小一号，别跟主键抢戏 */
 .nc-mode-btn svg{width:15px;height:15px;}
-/* 右侧对称占位：抵消左侧模式按钮的宽度，让主播放键回到正中央 */
-.nc-ctrl-spacer{width:28px;height:28px;flex:0 0 auto;}
+/* 喜欢：红心。未喜欢是描边、跟随次要文字色；已喜欢填实心红。
+   它正好接替原来右侧的对称占位块，让主播放键依旧居中。 */
+.nc-like-btn svg{width:16px;height:16px;}
+.nc-like-btn.liked{color:#e6495b;}
+.nc-like-btn.liked:hover:not(:disabled){
+  color:#d63a4e;background:rgba(230,73,91,.12);
+}
 
 /* 主按钮：实心强调色 + 与之对比的图标色。
    两个颜色都来自本插件变量，不引用 brand-primary（那个在深色下是白色）。 */

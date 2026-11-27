@@ -22,6 +22,7 @@ import {
   parseElogHeader,
   eventTimeOf,
   extractTrack,
+  extractSource,
   classifyLine,
   ElogWatcher,
   defaultElogPath,
@@ -71,8 +72,11 @@ function line(rest, agoMs = 0, tag = '【playing】') {
 }
 
 /** 造「曲目详情」那条（playOneTrackInPlayingList / checkPlayPrivilege 同形） */
-function trackLine({ id, name, artist, duration }, agoMs, kind = 'playOneTrackInPlayingList') {
-  const json = `{"id":"${id}","displayOrder":1,"track":{"id":"${id}","duration":${duration},"name":"${name}","artists":[{"id":"1","name":"${artist}"}],"album":{"id":"2","name":"专辑名"}}}`
+function trackLine({ id, name, artist, duration, scene, href, text }, agoMs, kind = 'playOneTrackInPlayingList') {
+  const src = scene || href || text
+    ? `"scene":"${scene || ''}","href":"${href || ''}","text":"${text || ''}",`
+    : ''
+  const json = `{"id":"${id}","displayOrder":1,${src}"localTrack":{},"track":{"id":"${id}","duration":${duration},"name":"${name}","artists":[{"id":"1","name":"${artist}"}],"album":{"id":"2","name":"专辑名"}}}`
   return line(`,"${kind}",${json}`, agoMs)
 }
 
@@ -82,6 +86,13 @@ function trackLine({ id, name, artist, duration }, agoMs, kind = 'playOneTrackIn
  */
 function metaLine({ id, name, artist, duration }, agoMs, kind = 'nativePlay') {
   const json = `{"id":"${id}","displayOrder":1,"track":{"id":"${id}","duration":${duration},"name":"${name}","artists":[{"id":"1","name":"${artist}"}],"album":{"id":"2","name":"专辑名"}}}`
+  const mid = kind === 'refreshCurPlaying' ? '"curPlaying=",' : ''
+  return line(`,"${kind}",${mid}${json}`, agoMs)
+}
+
+/** 带顶层来源（scene/href/text）的 refreshCurPlaying，形状对齐真机日志 */
+function sourceMetaLine({ id, name, artist, duration, scene, href, text }, agoMs, kind = 'refreshCurPlaying') {
+  const json = `{"id":"${id}","displayOrder":1,"ai":"","aiRcmd":false,"scene":"${scene}","href":"${href}","text":"${text}","localTrack":{},"track":{"id":"${id}","duration":${duration},"name":"${name}","artists":[{"id":"1","name":"${artist}"}],"album":{"id":"2","name":"专辑名"}}}`
   const mid = kind === 'refreshCurPlaying' ? '"curPlaying=",' : ''
   return line(`,"${kind}",${mid}${json}`, agoMs)
 }
@@ -194,6 +205,35 @@ test('extractTrack 对没有 id / name 的片段返回 null', () => {
   assert.equal(extractTrack('{"foo":1}'), null)
   assert.equal(extractTrack('{"id":"1"}'), null)
   assert.equal(extractTrack(undefined), null)
+})
+
+test('extractSource 从 curPlaying 顶层取 scene/href/text', () => {
+  const text =
+    '{"id":"1","scene":"playlist","href":"/playlist/18334824318","text":"临时","localTrack":{},"track":{"id":"1"}}'
+  assert.deepEqual(extractSource(text), {
+    scene: 'playlist',
+    href: '/playlist/18334824318',
+    text: '临时',
+  })
+})
+
+test('extractSource 顶层无来源字段时返回 null（不被 track 内同名字段误伤）', () => {
+  // 核心防错点：firstString 取第一个匹配，若不在 "localTrack" 处截断，
+  // 就会把 track 内部的 scene/text 当成来源 → 显示错误。
+  const text = '{"id":"1","localTrack":{},"track":{"scene":"track内","text":"track内","name":"歌"}}'
+  assert.equal(extractSource(text), null)
+})
+
+test('extractSource 还原 text 里的 JSON 转义', () => {
+  // 源文本里 text 值是 "我\"歌单\""（JSON 转义），捕获后应还原成 我"歌单"
+  const text = '{"scene":"playlist","text":"我\\"歌单\\"","localTrack":{}}'
+  assert.deepEqual(extractSource(text), { scene: 'playlist', href: '', text: '我"歌单"' })
+})
+
+test('extractSource 对空/非字符串输入返回 null', () => {
+  assert.equal(extractSource(undefined), null)
+  assert.equal(extractSource(''), null)
+  assert.equal(extractSource('{"foo":1,"localTrack":{}}'), null)
 })
 
 test('classifyLine 区分「开始load」与「load完成，开始播放」', () => {
@@ -601,6 +641,119 @@ test('Watcher：refreshCurPlaying 在播放中途出现时不打断进度', () =
     const after = w.getState()
     assert.ok(after.positionMs >= before - 1_000, `after=${after.positionMs}，不该跳回开头`)
     assert.equal(after.track.title, '正在播')
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：refreshCurPlaying 记录来源，nativePlay 不清除（last-known）', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    sourceMetaLine(
+      { id: '3', name: '正在播', artist: 'P', duration: 300_000, scene: 'playlist', href: '/playlist/18334824318', text: '临时' },
+      0,
+    ),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    assert.deepEqual(w.getState().source, {
+      scene: 'playlist',
+      href: '/playlist/18334824318',
+      text: '临时',
+    })
+
+    // 之后来一条不带来源的 nativePlay，来源应保持 last-known
+    appendLog(file, [
+      metaLine({ id: '3', name: '正在播', artist: 'P', duration: 300_000 }, 0, 'nativePlay'),
+    ])
+    w.poll()
+    assert.equal(w.getState().source.text, '临时')
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：来源 text 为空也记录（前端显示「未知」）', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    sourceMetaLine(
+      { id: '4', name: '歌', artist: 'Q', duration: 200_000, scene: 'orpheusMessage', href: '', text: '' },
+      0,
+    ),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    const s = w.getState().source
+    assert.ok(s, '来源对象应存在（含空 text）')
+    assert.equal(s.text, '')
+    assert.equal(s.scene, 'orpheusMessage')
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：playOneTrackInPlayingList 顶层来源写入 source（每次切歌必发）', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine(
+      { id: '5', name: 'Letting Go', artist: '蔡健雅', duration: 259_000, scene: 'playlist', href: '', text: '穗织第一幼刀_喜欢的音乐' },
+      0,
+    ),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    assert.deepEqual(w.getState().source, {
+      scene: 'playlist',
+      href: '',
+      text: '穗织第一幼刀_喜欢的音乐',
+    })
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：随后无来源的 track 事件不清除上次来源（last-known）', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine(
+      { id: '5', name: 'Letting Go', artist: '蔡健雅', duration: 259_000, scene: 'playlist', href: '', text: '临时歌单' },
+      4_000,
+    ),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    assert.equal(w.getState().source.text, '临时歌单')
+    // 同次起播连发的那条无来源事件（checkPlayPrivilege）不该清空来源
+    appendLog(file, [
+      trackLine({ id: '5', name: 'Letting Go', artist: '蔡健雅', duration: 259_000 }, 0, 'checkPlayPrivilege'),
+    ])
+    w.poll()
+    assert.equal(w.getState().source.text, '临时歌单')
+  } finally {
+    w.stop()
+  }
+})
+
+test('Watcher：每日推荐来源（dailyRecommend）正确抽取', () => {
+  const file = tmpFile()
+  writeLog(file, [
+    trackLine(
+      { id: '6', name: '歌', artist: 'R', duration: 200_000, scene: 'dailyRecommend', href: '', text: '每日歌曲推荐' },
+      0,
+    ),
+  ])
+  const w = new ElogWatcher({ filePath: file })
+  w.start()
+  try {
+    assert.deepEqual(w.getState().source, {
+      scene: 'dailyRecommend',
+      href: '',
+      text: '每日歌曲推荐',
+    })
   } finally {
     w.stop()
   }
