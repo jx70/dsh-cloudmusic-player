@@ -3,7 +3,24 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.7.22] - 2026-11-27
+
+### Fixed
+
+- 修复「客户端暂停后再放 B 站视频、插件识别不到歌」。根因：client-first 模式原来会按「哪条通道正在播」动态选路，Chromium（Edge/Chrome）只向系统上报一个 SMTC 会话，B 站视频一放就顶掉音乐会话，web 通道的 SMTC 回退于是把视频当媒体/误判无歌。改为：client-first 下**客户端进程在线就锁定 native 通道**，完全不碰 web/浏览器 SMTC；只有客户端进程不在时才让网页版接管。客户端在线时行为与适配网页版之前完全一致。网页优先请显式切 web-first / web-only。
+- 顺带修 detectClientRunning：宿主 env.SystemRoot 异常时 tasklist 绝对路径拼错导致 ENOENT，改为多候选路径逐个试 + 裸名兜底。health 增加「客户端进程 在线/离线」诊断字段。
+
+## [0.7.21] - 2026-11-27
+
+### Fixed
+
+- 修复 0.7.20 引入的回归：网易云「暂停」时 SMTC 会话的 artist 常被清空，被「artist 空即非音乐」判据误当成视频挡掉，导致暂停后识别不到歌。改为：artist 空但歌名与 sticky 记忆一致时用记忆里的歌手补回、照常识别；只有无歌手且歌名不匹配（真正的视频/网页媒体）才挡下。SmtcBrowser 与 web-backend 两层同步。
+
 ## [0.7.20] - 2026-11-27
+
+### Fixed
+
+- 客户端打开但未播放时，SMTC 里可能出现无歌手、无站点后缀的 B 站/网页视频会话（如「笨蛋教学，高维理解：压枪的第一性原理」），旧判据只靠站点标记漏判，把视频标题当成正在播放的歌显示。改为「artist 为空即非音乐」：smtc-browser 与 web-backend 两层统一按此判据挡下，走 sticky 兜底（有记住的歌显示歌，否则如实报无音乐会话），不再把视频当歌。
 
 ### 维护
 

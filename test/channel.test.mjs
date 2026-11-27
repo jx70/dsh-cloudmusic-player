@@ -48,6 +48,16 @@ test('channelMode 四种模式选择正确', async () => {
   assert.equal(await router('web-first', true, false).pick(), 'native')
 })
 
+test('client-first 客户端在线时锁定 native，不读 web/浏览器 SMTC', async () => {
+  const r = router('client-first', true, true)
+  // 若实现又去探测哪条通道在播（web 通道会读浏览器 SMTC，被 B 站视频抢占），
+  // 这里直接抛错让测试失败。客户端在线就必须锁 native。
+  r.channelPlaying = async () => { throw new Error('client-first 不该调用 channelPlaying') }
+  assert.equal(await r.pick(), 'native')
+  assert.equal((await r.state()).via, 'native')
+  assert.equal((await r.action('next')).via, 'native')
+})
+
 test('未知模式回退 client-first', async () => {
   assert.equal(await router('???', true, true).pick(), 'native')
   assert.equal(await router('???', false, true).pick(), 'web')

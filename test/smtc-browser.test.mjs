@@ -107,7 +107,7 @@ test('readState TTL 缓存：连续两次读只 spawn 一次，pos 按经过时�
 test('readState 并发合并：同一瞬间多次读共享一次 probe', async () => {
   let spawnCount = 0
   const s = new SmtcBrowser({
-    spawnFactory: () => { spawnCount++; return fakeChild([JSON.stringify({ ok: true, title: 'X', status: 'Paused' })]) },
+    spawnFactory: () => { spawnCount++; return fakeChild([JSON.stringify({ ok: true, title: 'X', artist: '歌手X', status: 'Paused' })]) },
   })
   const [a, b, c] = await Promise.all([s.readState(), s.readState(), s.readState()])
   assert.equal(spawnCount, 1, '并发三次读只 spawn 一次')
@@ -203,6 +203,22 @@ test('视频抢占 SMTC 后用最近一次真实音乐（暂停态）兜底，�
   probeResult = { ok: true, title: 'xxx_bilibili', artist: '', status: 'Playing', pos: 1, end: 100 }
   const video = await s.readState()
   assert.equal(video.title, '会呼吸的痛', '视频会话不能覆盖兜底记忆')
+})
+
+test('网易云暂停时 SMTC 清空 artist，但歌名与记住的一致 → 补回歌手照常识别', async () => {
+  let probeResult = { ok: true, title: '会呼吸的痛', artist: '梁静茹', status: 'Playing', pos: 10, end: 272, aumid: 'msedge.exe' }
+  const s = new SmtcBrowser({ spawnFactory: () => fakeChild([JSON.stringify(probeResult)]) })
+  const first = await s.readState()
+  assert.equal(first.artist, '梁静茹')
+
+  // 暂停后 SMTC 会话 artist 变空，但 title 仍是这首歌
+  s.invalidate()
+  probeResult = { ok: true, title: '会呼吸的痛', artist: '', status: 'Paused', pos: 20, end: 272, aumid: 'msedge.exe' }
+  const paused = await s.readState()
+  assert.equal(paused.ok, true, '暂停的歌应照常识别，不能被当成视频挡掉')
+  assert.equal(paused.title, '会呼吸的痛')
+  assert.equal(paused.artist, '梁静茹', '应用 sticky 记忆补回被清空的歌手')
+  assert.equal(paused.status, 'Paused')
 })
 
 test('控制作业回读到视频标题时用 sticky 歌名覆盖，保持显示网易云歌', async () => {

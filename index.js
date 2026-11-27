@@ -639,7 +639,7 @@ export function apply(ctx, config) {
             const h = await player.deepHealth()
             return {
               text: [
-                `当前通道 ${h.channel || player.active}${h.loggedIn !== undefined ? ` · 网页登录 ${h.loggedIn ? '已登录' : '未登录'}` : ''}`,
+                `当前通道 ${h.channel || player.active}${h.loggedIn !== undefined ? ` · 网页登录 ${h.loggedIn ? '已登录' : '未登录'}` : ''}${h.clientOnline !== undefined ? ` · 客户端进程 ${h.clientOnline ? '在线' : '离线'}` : ''}`,
                 `平台 ${h.platform} · 后端 ${h.backend} · PowerShell ${h.ps || '?'} · WinRT ${h.winrt ? 'ok' : '不可用'} · 窗口 ${h.window ? 'ok' : '不可用'}`,
                 `进程 ${(h.pids || []).join(', ') || '(无)'} · 目标会话 ${h.target || '(SMTC 未匹配，走原生车道)'}`,
                 `媒体会话：${(h.media || []).map((m) => `${m.aumid}${m.title ? `(${m.title})` : ''}`).join(' / ') || '(无)'}`,
