@@ -87,3 +87,32 @@ test('detectClientRunning 非 win32 返回 false', async () => {
     assert.equal(await detectClientRunning({}), false)
   }
 })
+
+test('clientOnline 探测失败(undefined)时不缓存，回退用 helper 的 pids 判定在线', async () => {
+  const r = new ChannelRouter({
+    native: {
+      ...fakeNative(),
+      deepHealth: async () => ({ ok: true, pids: [1234, 5678] }),
+    },
+    web: fakeWeb(true),
+    getConfig: () => ({ channelMode: 'client-first', processName: 'cloudmusic' }),
+    log: () => {},
+    detect: async () => undefined, // 模拟沙箱里 tasklist 的 pipe spawn 被拦
+  })
+  // 探测失败 → helper 回退拿到 pids → 判为在线，且缓存 true。
+  assert.equal(await r.clientOnline(), true)
+  assert.equal(r._clientCache.value, true)
+  // client-first 下据此锁定 native，不切到 web。
+  assert.equal(await r.pick(), 'native')
+
+  // helper 也拿不到任何证据 → undefined，不应被缓存。
+  const r2 = new ChannelRouter({
+    native: { ...fakeNative(), deepHealth: async () => ({ ok: false, detail: 'EPERM' }), state: async () => ({ ok: false }) },
+    web: fakeWeb(true),
+    getConfig: () => ({ channelMode: 'client-first' }),
+    log: () => {},
+    detect: async () => undefined,
+  })
+  assert.equal(await r2.clientOnline(), undefined)
+  assert.equal(r2._clientCache.value, null)
+})

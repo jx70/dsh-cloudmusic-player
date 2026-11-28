@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.7.23] - 2026-11-28
+
+### Fixed
+
+- 修复「连接客户端时调 APP 音量，界面显示变了、实际音量没变」。根因：helper.ps1 把 Core Audio 的 COM 对象（`IAudioSessionManager2` / `IAudioEndpointVolume`）长期缓存，默认音频设备切换（插拔耳机/蓝牙/虚拟声卡）后缓存仍绑定旧端点，`SetMasterVolume` 静默写到旧设备、回读也读旧设备，于是回显「正确」而真实音量不变。改为：在 `SetProcVol` / `SetProcMute` / `SetSysVol` / `SetSysMute` 四个写操作前强制 `Reset()` 重建 COM 对象，绑定到当前默认端点；读操作保留缓存维持轮询性能。
+- 修复 `detectClientRunning()` 在宿主沙箱里 spawn `tasklist` 的 pipe stdio 被 EPERM 拦掉时静默返回 `undefined`，被 `clientOnline()` 当「离线」缓存 3 秒、client-first 误切 web 通道导致「客户端明明在放歌却有时不识别」。改为：探测失败时回退问常驻 helper 的真实 pids，且只缓存布尔结果、`undefined` 不缓存；`detect` 做成可注入依赖，新增回归测试。
+- 恢复 `lib/helper.ps1` 的 UTF-16 LE BOM（编辑工具曾丢失，导致 PowerShell 5.1 按 ANSI 读中文乱码、内嵌 C# 编译失败）；`test/channel.test.mjs` 新增 1 例。全套 214 测试通过。
+
 ## [0.7.22] - 2026-11-27
 
 ### Fixed

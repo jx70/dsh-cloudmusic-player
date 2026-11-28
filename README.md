@@ -81,7 +81,7 @@ dsh plugin --profile desktop add dsh-cloudmusic-player
 node scripts/enable-desktop.mjs      # 把包接进桌面 profile（幂等）；在 clone 下来的目录里跑
 ```
 
-> npm 包暂时落后于 GitHub 时，可以指定 GitHub 源装最新版：把上面的包名换成 `github:YOUR_GITHUB_USER/dsh-cloudmusic-player`。
+> npm 包暂时落后于 GitHub 时，可以指定 GitHub 源装最新版：把上面的包名换成 `github:jx70/dsh-cloudmusic-player`。
 
 然后重开 DSH。右下角出现小胶囊，点 ⌃ 展开。
 
@@ -89,7 +89,7 @@ node scripts/enable-desktop.mjs      # 把包接进桌面 profile（幂等）；
 <summary><b>从源码装 / 本地开发</b></summary>
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/dsh-cloudmusic-player.git
+git clone https://github.com/jx70/dsh-cloudmusic-player.git
 cd dsh-cloudmusic-player
 npm install
 dsh plugin --profile web add link:"$PWD"     # Windows 上把 $PWD 换成绝对路径 D:/...
